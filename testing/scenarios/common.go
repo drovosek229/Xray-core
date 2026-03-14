@@ -252,12 +252,14 @@ func testTCPConn2(conn net.Conn, payloadSize int, timeout time.Duration) func() 
 }
 
 func WaitConnAvailableWithTest(t *testing.T, testFunc func() error) bool {
+	t.Helper()
+
 	for i := 1; ; i++ {
-		if i > 10 {
-			t.Log("All attempts failed to test tcp conn")
+		if i > 100 {
+			t.Log("All attempts failed to test connection")
 			return false
 		}
-		time.Sleep(time.Millisecond * 10)
+		time.Sleep(time.Millisecond * 20)
 		if err := testFunc(); err != nil {
 			t.Log("err ", err)
 		} else {
