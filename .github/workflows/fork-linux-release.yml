@@ -1,0 +1,159 @@
+name: Fork Linux Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+concurrency:
+  group: fork-linux-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare-assets:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download geo assets
+        run: |
+          mkdir -p resources
+          curl -fsSL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat -o resources/geoip.dat
+          curl -fsSL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat -o resources/geosite.dat
+          test -s resources/geoip.dat
+          test -s resources/geosite.dat
+
+      - name: Upload geo assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: geo-assets
+          path: |
+            resources/geoip.dat
+            resources/geosite.dat
+          if-no-files-found: error
+
+  build-linux:
+    needs: prepare-assets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset_name: linux-amd64
+            role: server
+            goos: linux
+            goarch: amd64
+          - asset_name: linux-arm64
+            role: server-router
+            goos: linux
+            goarch: arm64
+          - asset_name: linux-armv7
+            role: router
+            goos: linux
+            goarch: arm
+            goarm: "7"
+          - asset_name: linux-mipsle-softfloat
+            role: router
+            goos: linux
+            goarch: mipsle
+            gomips: softfloat
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      GOARM: ${{ matrix.goarm }}
+      GOMIPS: ${{ matrix.gomips }}
+      CGO_ENABLED: 0
+    steps:
+      - name: Checkout codebase
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Download geo assets
+        uses: actions/download-artifact@v6
+        with:
+          name: geo-assets
+          path: resources
+
+      - name: Build binary
+        run: |
+          mkdir -p build_assets
+          COMMID=$(git describe --always --dirty)
+          if [[ "${GOARCH}" == "mips" || "${GOARCH}" == "mipsle" ]]; then
+            GCFLAGS='-l=4'
+          else
+            GCFLAGS='all=-l=4'
+          fi
+          go build \
+            -o build_assets/xray \
+            -trimpath \
+            -buildvcs=false \
+            -gcflags="${GCFLAGS}" \
+            -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" \
+            -v ./main
+
+      - name: Assemble package
+        run: |
+          cp resources/geoip.dat build_assets/
+          cp resources/geosite.dat build_assets/
+          cp README.md build_assets/
+          cp LICENSE build_assets/
+          printf 'target=%s\nrole=%s\ncommit=%s\n' \
+            "${{ matrix.asset_name }}" \
+            "${{ matrix.role }}" \
+            "$(git rev-parse HEAD)" > build_assets/BUILD_INFO.txt
+
+      - name: Create archive
+        run: |
+          archive="Xray-${{ matrix.asset_name }}.tar.gz"
+          tar -C build_assets -czf "${archive}" .
+          sha256sum "${archive}" > "${archive}.sha256"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.asset_name }}
+          path: |
+            Xray-${{ matrix.asset_name }}.tar.gz
+            Xray-${{ matrix.asset_name }}.tar.gz.sha256
+          if-no-files-found: error
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: release_assets
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd release_assets
+          sha256sum Xray-*.tar.gz > SHA256SUMS
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release_assets/Xray-*.tar.gz
+            release_assets/Xray-*.tar.gz.sha256
+            release_assets/SHA256SUMS
+          generate_release_notes: true
