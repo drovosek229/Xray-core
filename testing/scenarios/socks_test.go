@@ -1,6 +1,7 @@
 package scenarios
 
 import (
+	stdnet "net"
 	"testing"
 	"time"
 
@@ -21,6 +22,47 @@ import (
 	xproxy "golang.org/x/net/proxy"
 	socks4 "h12.io/socks"
 )
+
+func pickTCPAndUDPPort(t *testing.T) net.Port {
+	t.Helper()
+
+	for attempt := 0; attempt < 20; attempt++ {
+		listener, err := stdnet.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			continue
+		}
+
+		port := listener.Addr().(*stdnet.TCPAddr).Port
+		udpConn, err := stdnet.ListenUDP("udp4", &stdnet.UDPAddr{
+			IP:   stdnet.ParseIP("127.0.0.1"),
+			Port: port,
+		})
+		listener.Close()
+		if err != nil {
+			continue
+		}
+
+		udpConn.Close()
+		return net.Port(port)
+	}
+
+	t.Fatal("failed to pick a loopback port that supports both TCP and UDP")
+	return 0
+}
+
+func pickDistinctUDPPort(t *testing.T, excluded net.Port) net.Port {
+	t.Helper()
+
+	for attempt := 0; attempt < 20; attempt++ {
+		port := udp.PickPort()
+		if port != excluded {
+			return port
+		}
+	}
+
+	t.Fatalf("failed to pick a UDP port distinct from %d", excluded)
+	return 0
+}
 
 func TestSocksBridgeTCP(t *testing.T) {
 	tcpServer := tcp.Server{
@@ -76,7 +118,7 @@ func TestSocksBridgeTCP(t *testing.T) {
 					Server: &protocol.ServerEndpoint{
 						Address: net.NewIPOrDomain(net.LocalHostIP),
 						Port:    uint32(serverPort),
-						User:    &protocol.User{
+						User: &protocol.User{
 							Account: serial.ToTypedMessage(&socks.Account{
 								Username: "Test Account",
 								Password: "Test Password",
@@ -151,7 +193,7 @@ func TestSocksWithHttpRequest(t *testing.T) {
 					Server: &protocol.ServerEndpoint{
 						Address: net.NewIPOrDomain(net.LocalHostIP),
 						Port:    uint32(serverPort),
-						User:    &protocol.User{
+						User: &protocol.User{
 							Account: serial.ToTypedMessage(&http.Account{
 								Username: "Test Account",
 								Password: "Test Password",
@@ -181,7 +223,8 @@ func TestSocksBridageUDP(t *testing.T) {
 	defer udpServer.Close()
 
 	retry := 1
-	serverPort := tcp.PickPort()
+	serverPort := pickTCPAndUDPPort(t)
+	dokodemoPort := pickDistinctUDPPort(t, serverPort)
 	for {
 		serverConfig := &core.Config{
 			Inbound: []*core.InboundHandlerConfig{
@@ -201,7 +244,7 @@ func TestSocksBridageUDP(t *testing.T) {
 				},
 				{
 					ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-						PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort + 1)}},
+						PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(dokodemoPort)}},
 						Listen:   net.NewIPOrDomain(net.LocalHostIP),
 					}),
 					ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
@@ -219,7 +262,7 @@ func TestSocksBridageUDP(t *testing.T) {
 		}
 
 		server, _ := InitializeServerConfig(serverConfig)
-		if server != nil && WaitConnAvailableWithTest(t, testUDPConn(serverPort+1, 1024, time.Second*2)) {
+		if server != nil && WaitConnAvailableWithTest(t, testUDPConn(dokodemoPort, 1024, time.Second*2)) {
 			defer CloseServer(server)
 			break
 		}
@@ -227,7 +270,8 @@ func TestSocksBridageUDP(t *testing.T) {
 		if retry > 5 {
 			t.Fatal("All attempts failed to start server")
 		}
-		serverPort = tcp.PickPort()
+		serverPort = pickTCPAndUDPPort(t)
+		dokodemoPort = pickDistinctUDPPort(t, serverPort)
 	}
 
 	clientPort := udp.PickPort()
@@ -251,7 +295,7 @@ func TestSocksBridageUDP(t *testing.T) {
 					Server: &protocol.ServerEndpoint{
 						Address: net.NewIPOrDomain(net.LocalHostIP),
 						Port:    uint32(serverPort),
-						User:    &protocol.User{
+						User: &protocol.User{
 							Account: serial.ToTypedMessage(&socks.Account{
 								Username: "Test Account",
 								Password: "Test Password",
@@ -281,7 +325,8 @@ func TestSocksBridageUDPWithRouting(t *testing.T) {
 	defer udpServer.Close()
 
 	retry := 1
-	serverPort := tcp.PickPort()
+	serverPort := pickTCPAndUDPPort(t)
+	dokodemoPort := pickDistinctUDPPort(t, serverPort)
 	for {
 		serverConfig := &core.Config{
 			App: []*serial.TypedMessage{
@@ -312,7 +357,7 @@ func TestSocksBridageUDPWithRouting(t *testing.T) {
 				{
 					Tag: "dokodemo",
 					ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-						PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(serverPort + 1)}},
+						PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(dokodemoPort)}},
 						Listen:   net.NewIPOrDomain(net.LocalHostIP),
 					}),
 					ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
@@ -334,7 +379,7 @@ func TestSocksBridageUDPWithRouting(t *testing.T) {
 		}
 
 		server, _ := InitializeServerConfig(serverConfig)
-		if server != nil && WaitConnAvailableWithTest(t, testUDPConn(serverPort+1, 1024, time.Second*2)) {
+		if server != nil && WaitConnAvailableWithTest(t, testUDPConn(dokodemoPort, 1024, time.Second*2)) {
 			defer CloseServer(server)
 			break
 		}
@@ -342,7 +387,8 @@ func TestSocksBridageUDPWithRouting(t *testing.T) {
 		if retry > 5 {
 			t.Fatal("All attempts failed to start server")
 		}
-		serverPort = tcp.PickPort()
+		serverPort = pickTCPAndUDPPort(t)
+		dokodemoPort = pickDistinctUDPPort(t, serverPort)
 	}
 
 	clientPort := udp.PickPort()
