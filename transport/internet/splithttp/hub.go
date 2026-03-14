@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apernet/quic-go"
@@ -47,13 +48,50 @@ type httpSession struct {
 	// after the client connects, this becomes "done" and the session lives as
 	// long as the GET request.
 	isFullyConnected *done.Instance
+	createdAt        time.Time
+	lastActivity     atomic.Int64
+	openTimeout      time.Duration
+	idleTimeout      time.Duration
+	closeOnce        sync.Once
+}
+
+func newHTTPSession(config *Config) *httpSession {
+	session := &httpSession{
+		uploadQueue:      NewUploadQueue(config.GetNormalizedScMaxBufferedPosts()),
+		isFullyConnected: done.New(),
+		createdAt:        time.Now(),
+		openTimeout:      config.GetNormalizedSessionOpenTimeout(),
+		idleTimeout:      config.GetNormalizedSessionIdleTimeout(),
+	}
+	session.touch()
+	return session
+}
+
+func (s *httpSession) touch() {
+	s.lastActivity.Store(time.Now().UnixNano())
+}
+
+func (s *httpSession) lastTouchedAt() time.Time {
+	lastActivity := s.lastActivity.Load()
+	if lastActivity == 0 {
+		return s.createdAt
+	}
+	return time.Unix(0, lastActivity)
+}
+
+func (s *httpSession) close() {
+	s.closeOnce.Do(func() {
+		s.uploadQueue.Close()
+	})
 }
 
 func (h *requestHandler) upsertSession(sessionId string) *httpSession {
 	// fast path
 	currentSessionAny, ok := h.sessions.Load(sessionId)
 	if ok {
-		return currentSessionAny.(*httpSession)
+		currentSession := currentSessionAny.(*httpSession)
+		currentSession.touch()
+		return currentSession
 	}
 
 	// slow path
@@ -62,27 +100,37 @@ func (h *requestHandler) upsertSession(sessionId string) *httpSession {
 
 	currentSessionAny, ok = h.sessions.Load(sessionId)
 	if ok {
-		return currentSessionAny.(*httpSession)
+		currentSession := currentSessionAny.(*httpSession)
+		currentSession.touch()
+		return currentSession
 	}
 
-	s := &httpSession{
-		uploadQueue:      NewUploadQueue(h.ln.config.GetNormalizedScMaxBufferedPosts()),
-		isFullyConnected: done.New(),
-	}
+	s := newHTTPSession(h.ln.config)
 
 	h.sessions.Store(sessionId, s)
 
-	shouldReap := done.New()
 	go func() {
-		time.Sleep(30 * time.Second)
-		shouldReap.Close()
-	}()
-	go func() {
-		select {
-		case <-shouldReap.Wait():
-			h.sessions.Delete(sessionId)
-			s.uploadQueue.Close()
-		case <-s.isFullyConnected.Wait():
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			<-ticker.C
+			now := time.Now()
+			if !s.isFullyConnected.Done() {
+				if s.openTimeout > 0 && now.Sub(s.createdAt) >= s.openTimeout {
+					h.sessions.Delete(sessionId)
+					s.close()
+					return
+				}
+			} else {
+				if s.idleTimeout <= 0 {
+					return
+				}
+				if now.Sub(s.lastTouchedAt()) >= s.idleTimeout {
+					h.sessions.Delete(sessionId)
+					s.close()
+					return
+				}
+			}
 		}
 	}()
 
@@ -188,6 +236,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	var currentSession *httpSession
 	if sessionId != "" {
 		currentSession = h.upsertSession(sessionId)
+		currentSession.touch()
 	}
 	scMaxEachPostBytes := int(h.ln.config.GetNormalizedScMaxEachPostBytes().To)
 	isUplinkRequest := false
@@ -212,6 +261,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				Instance:       done.New(),
 				Reader:         request.Body,
 				ResponseWriter: writer,
+				onActivity:     currentSession.touch,
 			}
 			err = currentSession.uploadQueue.Push(Packet{
 				Reader: httpSC,
@@ -326,6 +376,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			writer.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		currentSession.touch()
 
 		if len(bodyPayload) == 0 {
 			// Methods without a body are usually cached by default.
@@ -348,9 +399,8 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		// teeing the response stream into their cache, causing slowdowns.
 		writer.Header().Set("Cache-Control", "no-store")
 
-		if !h.config.NoSSEHeader {
-			// magic header to make the HTTP middle box consider this as SSE to disable buffer
-			writer.Header().Set("Content-Type", "text/event-stream")
+		if contentType := h.config.GetResponseContentType(request); contentType != "" {
+			writer.Header().Set("Content-Type", contentType)
 		}
 
 		writer.WriteHeader(http.StatusOK)
@@ -360,6 +410,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			Instance:       done.New(),
 			Reader:         request.Body,
 			ResponseWriter: writer,
+			onActivity:     func() {},
 		}
 		conn := splitConn{
 			writer:     httpSC,
@@ -369,6 +420,8 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 		if sessionId != "" { // if not stream-one
 			conn.reader = currentSession.uploadQueue
+			httpSC.onActivity = currentSession.touch
+			currentSession.touch()
 		}
 
 		h.ln.addConn(stat.Connection(&conn))
@@ -391,6 +444,7 @@ type httpServerConn struct {
 	*done.Instance
 	io.Reader // no need to Close request.Body
 	http.ResponseWriter
+	onActivity func()
 }
 
 func (c *httpServerConn) Write(b []byte) (int, error) {
@@ -401,6 +455,9 @@ func (c *httpServerConn) Write(b []byte) (int, error) {
 	}
 	n, err := c.ResponseWriter.Write(b)
 	if err == nil {
+		if c.onActivity != nil {
+			c.onActivity()
+		}
 		c.ResponseWriter.(http.Flusher).Flush()
 	}
 	return n, err

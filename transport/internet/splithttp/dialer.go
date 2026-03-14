@@ -1,8 +1,10 @@
 package splithttp
 
 import (
+	"bytes"
 	"context"
 	gotls "crypto/tls"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -64,10 +66,7 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 
 	if !found {
 		transportConfig := streamSettings.ProtocolSettings.(*Config)
-		var xmuxConfig XmuxConfig
-		if transportConfig.Xmux != nil {
-			xmuxConfig = *transportConfig.Xmux
-		}
+		xmuxConfig := getConfiguredXmux(transportConfig, decideHTTPVersion(tls.ConfigFromStreamSettings(streamSettings), realityConfig))
 
 		xmuxManager = NewXmuxManager(xmuxConfig, func() XmuxConn {
 			return createHTTPClient(dest, streamSettings)
@@ -334,7 +333,6 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 			Transport: transport,
 		},
 		httpVersion:    httpVersion,
-		uploadRawPool:  &sync.Pool{},
 		dialUploadConn: dialContext,
 	}
 
@@ -377,6 +375,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	requestURL.RawQuery = transportConfiguration.GetNormalizedQuery()
 
 	httpClient, xmuxClient := getHTTPClient(ctx, dest, streamSettings)
+	requestBehavior := transportConfiguration.NewRequestBehavior(httpVersion)
 
 	mode := transportConfiguration.Mode
 	if mode == "" || mode == "auto" {
@@ -400,6 +399,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	requestURL2 := requestURL
 	httpClient2 := httpClient
 	xmuxClient2 := xmuxClient
+	requestBehavior2 := requestBehavior
 	if transportConfiguration.DownloadSettings != nil {
 		globalDialerAccess.Lock()
 		if streamSettings.DownloadSettings == nil {
@@ -436,6 +436,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		requestURL2.Path = config2.GetNormalizedPath()
 		requestURL2.RawQuery = config2.GetNormalizedQuery()
 		httpClient2, xmuxClient2 = getHTTPClient(ctx, dest2, memory2)
+		requestBehavior2 = config2.NewRequestBehavior(httpVersion2)
 		errors.LogInfo(ctx, fmt.Sprintf("XHTTP is downloading from %s, mode %s, HTTP version %s, host %s", dest2, "stream-down", httpVersion2, requestURL2.Host))
 	}
 
@@ -469,7 +470,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		if xmuxClient != nil {
 			xmuxClient.LeftRequests.Add(-1)
 		}
-		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, false)
+		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, false, requestBehavior)
 		if err != nil { // browser dialer only
 			return nil, err
 		}
@@ -478,7 +479,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		if xmuxClient2 != nil {
 			xmuxClient2.LeftRequests.Add(-1)
 		}
-		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient2.OpenStream(ctx, requestURL2.String(), sessionId, nil, false)
+		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient2.OpenStream(ctx, requestURL2.String(), sessionId, nil, false, requestBehavior2)
 		if err != nil { // browser dialer only
 			return nil, err
 		}
@@ -487,7 +488,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		if xmuxClient != nil {
 			xmuxClient.LeftRequests.Add(-1)
 		}
-		_, _, _, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, true)
+		_, _, _, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, true, requestBehavior)
 		if err != nil { // browser dialer only
 			return nil, err
 		}
@@ -502,6 +503,9 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	}
 
 	maxUploadSize := scMaxEachPostBytes.rand()
+	if transportConfiguration.IsBalancedBehaviorProfile() {
+		maxUploadSize = max(1, scMaxEachPostBytes.To)
+	}
 	// WithSizeLimit(0) will still allow single bytes to pass, and a lot of
 	// code relies on this behavior. Subtract 1 so that together with
 	// uploadWriter wrapper, exact size limits can be enforced
@@ -529,7 +533,11 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			doSplit := atomic.Bool{}
 			for doSplit.Store(true); doSplit.Load(); {
 				var chunk buf.MultiBuffer
-				remainder, chunk = buf.SplitSize(remainder, maxUploadSize)
+				chunkSize := maxUploadSize
+				if transportConfiguration.IsBalancedBehaviorProfile() {
+					chunkSize = requestBehavior.NextUploadSize(scMaxEachPostBytes, remainder.Len())
+				}
+				remainder, chunk = buf.SplitSize(remainder, chunkSize)
 				if chunk.IsEmpty() {
 					break
 				}
@@ -546,7 +554,14 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				seq += 1
 
 				if scMinPostsIntervalMs.From > 0 {
-					time.Sleep(time.Duration(scMinPostsIntervalMs.rand())*time.Millisecond - time.Since(lastWrite))
+					sleepFor := time.Duration(scMinPostsIntervalMs.rand()) * time.Millisecond
+					if transportConfiguration.IsBalancedBehaviorProfile() {
+						sleepFor = requestBehavior.NextPostInterval(scMinPostsIntervalMs)
+					}
+					sleepFor -= time.Since(lastWrite)
+					if sleepFor > 0 {
+						time.Sleep(sleepFor)
+					}
 				}
 
 				lastWrite = time.Now()
@@ -556,14 +571,24 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 					httpClient, xmuxClient = getHTTPClient(ctx, dest, streamSettings)
 				}
 
+				payloadBytes, err := buf.ReadAllToBytes(&buf.MultiBufferContainer{MultiBuffer: chunk})
+				if err != nil {
+					errors.LogInfoInner(ctx, err, "failed to buffer upload")
+					uploadPipeReader.Interrupt()
+					doSplit.Store(false)
+					break
+				}
+
 				go func() {
-					err := httpClient.PostPacket(
+					err := postPacketWithRetry(
 						ctx,
+						httpClient,
+						transportConfiguration,
 						requestURL.String(),
 						sessionId,
 						seqStr,
-						&buf.MultiBufferContainer{MultiBuffer: chunk},
-						int64(chunk.Len()),
+						payloadBytes,
+						requestBehavior,
 					)
 					wroteRequest.Close()
 					if err != nil {
@@ -581,6 +606,101 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	}()
 
 	return stat.Connection(&conn), nil
+}
+
+func getConfiguredXmux(config *Config, httpVersion string) XmuxConfig {
+	if config.Xmux != nil && !isZeroXmuxConfig(*config.Xmux) {
+		return *config.Xmux
+	}
+	if !config.IsBalancedBehaviorProfile() {
+		if config.Xmux != nil {
+			return *config.Xmux
+		}
+		return XmuxConfig{}
+	}
+
+	switch httpVersion {
+	case "1.1":
+		return XmuxConfig{
+			MaxConcurrency:   &RangeConfig{From: 1, To: 1},
+			HMaxRequestTimes: &RangeConfig{From: 32, To: 96},
+			HMaxReusableSecs: &RangeConfig{From: 45, To: 180},
+		}
+	default:
+		return XmuxConfig{
+			MaxConcurrency:   &RangeConfig{From: 1, To: 2},
+			HMaxRequestTimes: &RangeConfig{From: 400, To: 800},
+			HMaxReusableSecs: &RangeConfig{From: 1200, To: 2400},
+			HKeepAlivePeriod: 30,
+		}
+	}
+}
+
+func isZeroXmuxConfig(config XmuxConfig) bool {
+	isZeroRange := func(config *RangeConfig) bool {
+		return config == nil || (config.From == 0 && config.To == 0)
+	}
+
+	return isZeroRange(config.MaxConcurrency) &&
+		isZeroRange(config.MaxConnections) &&
+		isZeroRange(config.CMaxReuseTimes) &&
+		isZeroRange(config.HMaxRequestTimes) &&
+		isZeroRange(config.HMaxReusableSecs) &&
+		config.HKeepAlivePeriod == 0
+}
+
+func postPacketWithRetry(ctx context.Context, client DialerClient, config *Config, requestURL string, sessionID string, seqStr string, payload []byte, behavior *RequestBehavior) error {
+	maxAttempts := 1
+	if config.IsBalancedBehaviorProfile() {
+		maxAttempts = 3
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		lastErr = client.PostPacket(
+			ctx,
+			requestURL,
+			sessionID,
+			seqStr,
+			bytes.NewReader(payload),
+			int64(len(payload)),
+			behavior,
+		)
+		if lastErr == nil {
+			return nil
+		}
+		if !config.IsBalancedBehaviorProfile() || !isRetriablePostError(lastErr) || attempt == maxAttempts-1 {
+			return lastErr
+		}
+
+		backoff := time.Duration(25*(1<<attempt))*time.Millisecond + time.Duration(cryptoRandJitterMillis(25))*time.Millisecond
+		time.Sleep(backoff)
+	}
+	return lastErr
+}
+
+func isRetriablePostError(err error) bool {
+	var statusErr *HTTPStatusError
+	if stderrors.As(err, &statusErr) {
+		switch statusErr.StatusCode {
+		case http.StatusConflict, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func cryptoRandJitterMillis(maxMillis int64) int64 {
+	if maxMillis <= 0 {
+		return 0
+	}
+	return cryptoRandBetween(0, maxMillis+1)
+}
+
+func cryptoRandBetween(from, to int64) int64 {
+	return int64(rand.Int63n(to-from)) + from
 }
 
 // A wrapper around pipe that ensures the size limit is exactly honored.

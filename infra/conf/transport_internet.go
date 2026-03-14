@@ -218,34 +218,37 @@ func (c *HttpUpgradeConfig) Build() (proto.Message, error) {
 }
 
 type SplitHTTPConfig struct {
-	Host                 string            `json:"host"`
-	Path                 string            `json:"path"`
-	Mode                 string            `json:"mode"`
-	Headers              map[string]string `json:"headers"`
-	XPaddingBytes        Int32Range        `json:"xPaddingBytes"`
-	XPaddingObfsMode     bool              `json:"xPaddingObfsMode"`
-	XPaddingKey          string            `json:"xPaddingKey"`
-	XPaddingHeader       string            `json:"xPaddingHeader"`
-	XPaddingPlacement    string            `json:"xPaddingPlacement"`
-	XPaddingMethod       string            `json:"xPaddingMethod"`
-	UplinkHTTPMethod     string            `json:"uplinkHTTPMethod"`
-	SessionPlacement     string            `json:"sessionPlacement"`
-	SessionKey           string            `json:"sessionKey"`
-	SeqPlacement         string            `json:"seqPlacement"`
-	SeqKey               string            `json:"seqKey"`
-	UplinkDataPlacement  string            `json:"uplinkDataPlacement"`
-	UplinkDataKey        string            `json:"uplinkDataKey"`
-	UplinkChunkSize      Int32Range        `json:"uplinkChunkSize"`
-	NoGRPCHeader         bool              `json:"noGRPCHeader"`
-	NoSSEHeader          bool              `json:"noSSEHeader"`
-	ScMaxEachPostBytes   Int32Range        `json:"scMaxEachPostBytes"`
-	ScMinPostsIntervalMs Int32Range        `json:"scMinPostsIntervalMs"`
-	ScMaxBufferedPosts   int64             `json:"scMaxBufferedPosts"`
-	ScStreamUpServerSecs Int32Range        `json:"scStreamUpServerSecs"`
-	ServerMaxHeaderBytes int32             `json:"serverMaxHeaderBytes"`
-	Xmux                 XmuxConfig        `json:"xmux"`
-	DownloadSettings     *StreamConfig     `json:"downloadSettings"`
-	Extra                json.RawMessage   `json:"extra"`
+	Host                   string            `json:"host"`
+	Path                   string            `json:"path"`
+	Mode                   string            `json:"mode"`
+	Headers                map[string]string `json:"headers"`
+	XPaddingBytes          Int32Range        `json:"xPaddingBytes"`
+	XPaddingObfsMode       bool              `json:"xPaddingObfsMode"`
+	XPaddingKey            string            `json:"xPaddingKey"`
+	XPaddingHeader         string            `json:"xPaddingHeader"`
+	XPaddingPlacement      string            `json:"xPaddingPlacement"`
+	XPaddingMethod         string            `json:"xPaddingMethod"`
+	UplinkHTTPMethod       string            `json:"uplinkHTTPMethod"`
+	SessionPlacement       string            `json:"sessionPlacement"`
+	SessionKey             string            `json:"sessionKey"`
+	SeqPlacement           string            `json:"seqPlacement"`
+	SeqKey                 string            `json:"seqKey"`
+	UplinkDataPlacement    string            `json:"uplinkDataPlacement"`
+	UplinkDataKey          string            `json:"uplinkDataKey"`
+	UplinkChunkSize        Int32Range        `json:"uplinkChunkSize"`
+	NoGRPCHeader           bool              `json:"noGRPCHeader"`
+	NoSSEHeader            bool              `json:"noSSEHeader"`
+	BehaviorProfile        string            `json:"behaviorProfile"`
+	ScMaxEachPostBytes     Int32Range        `json:"scMaxEachPostBytes"`
+	ScMinPostsIntervalMs   Int32Range        `json:"scMinPostsIntervalMs"`
+	ScMaxBufferedPosts     int64             `json:"scMaxBufferedPosts"`
+	ScStreamUpServerSecs   Int32Range        `json:"scStreamUpServerSecs"`
+	ServerMaxHeaderBytes   int32             `json:"serverMaxHeaderBytes"`
+	SessionOpenTimeoutSecs int64             `json:"sessionOpenTimeoutSecs"`
+	SessionIdleTimeoutSecs int64             `json:"sessionIdleTimeoutSecs"`
+	Xmux                   XmuxConfig        `json:"xmux"`
+	DownloadSettings       *StreamConfig     `json:"downloadSettings"`
+	Extra                  json.RawMessage   `json:"extra"`
 }
 
 type XmuxConfig struct {
@@ -285,6 +288,14 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 		return nil, errors.New("unsupported mode: " + c.Mode)
 	}
 
+	switch c.BehaviorProfile {
+	case "":
+		c.BehaviorProfile = splithttp.BehaviorProfileLegacy
+	case splithttp.BehaviorProfileLegacy, splithttp.BehaviorProfileBalanced:
+	default:
+		return nil, errors.New("unsupported behaviorProfile: " + c.BehaviorProfile)
+	}
+
 	// Priority (client): host > serverName > address
 	for k := range c.Headers {
 		if strings.ToLower(k) == "host" {
@@ -314,7 +325,11 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 
 	switch c.XPaddingMethod {
 	case "":
-		c.XPaddingMethod = "repeat-x"
+		if c.BehaviorProfile == splithttp.BehaviorProfileBalanced {
+			c.XPaddingMethod = string(splithttp.PaddingMethodTokenish)
+		} else {
+			c.XPaddingMethod = string(splithttp.PaddingMethodRepeatX)
+		}
 	case "repeat-x", "tokenish":
 	default:
 		return nil, errors.New("unsupported padding method: " + c.XPaddingMethod)
@@ -387,11 +402,17 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 	if c.ServerMaxHeaderBytes < 0 {
 		return nil, errors.New("invalid negative value of maxHeaderBytes")
 	}
+	if c.SessionOpenTimeoutSecs < 0 {
+		return nil, errors.New("invalid negative value of sessionOpenTimeoutSecs")
+	}
+	if c.SessionIdleTimeoutSecs < 0 {
+		return nil, errors.New("invalid negative value of sessionIdleTimeoutSecs")
+	}
 
 	if c.Xmux.MaxConnections.To > 0 && c.Xmux.MaxConcurrency.To > 0 {
 		return nil, errors.New("maxConnections cannot be specified together with maxConcurrency")
 	}
-	if c.Xmux == (XmuxConfig{}) {
+	if c.Xmux == (XmuxConfig{}) && c.BehaviorProfile != splithttp.BehaviorProfileBalanced {
 		c.Xmux.MaxConcurrency.From = 1
 		c.Xmux.MaxConcurrency.To = 1
 		c.Xmux.HMaxRequestTimes.From = 600
@@ -401,31 +422,34 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 	}
 
 	config := &splithttp.Config{
-		Host:                 c.Host,
-		Path:                 c.Path,
-		Mode:                 c.Mode,
-		Headers:              c.Headers,
-		XPaddingBytes:        newRangeConfig(c.XPaddingBytes),
-		XPaddingObfsMode:     c.XPaddingObfsMode,
-		XPaddingKey:          c.XPaddingKey,
-		XPaddingHeader:       c.XPaddingHeader,
-		XPaddingPlacement:    c.XPaddingPlacement,
-		XPaddingMethod:       c.XPaddingMethod,
-		UplinkHTTPMethod:     c.UplinkHTTPMethod,
-		SessionPlacement:     c.SessionPlacement,
-		SeqPlacement:         c.SeqPlacement,
-		SessionKey:           c.SessionKey,
-		SeqKey:               c.SeqKey,
-		UplinkDataPlacement:  c.UplinkDataPlacement,
-		UplinkDataKey:        c.UplinkDataKey,
-		UplinkChunkSize:      newRangeConfig(c.UplinkChunkSize),
-		NoGRPCHeader:         c.NoGRPCHeader,
-		NoSSEHeader:          c.NoSSEHeader,
-		ScMaxEachPostBytes:   newRangeConfig(c.ScMaxEachPostBytes),
-		ScMinPostsIntervalMs: newRangeConfig(c.ScMinPostsIntervalMs),
-		ScMaxBufferedPosts:   c.ScMaxBufferedPosts,
-		ScStreamUpServerSecs: newRangeConfig(c.ScStreamUpServerSecs),
-		ServerMaxHeaderBytes: c.ServerMaxHeaderBytes,
+		Host:                   c.Host,
+		Path:                   c.Path,
+		Mode:                   c.Mode,
+		Headers:                c.Headers,
+		XPaddingBytes:          newRangeConfig(c.XPaddingBytes),
+		XPaddingObfsMode:       c.XPaddingObfsMode,
+		XPaddingKey:            c.XPaddingKey,
+		XPaddingHeader:         c.XPaddingHeader,
+		XPaddingPlacement:      c.XPaddingPlacement,
+		XPaddingMethod:         c.XPaddingMethod,
+		UplinkHTTPMethod:       c.UplinkHTTPMethod,
+		SessionPlacement:       c.SessionPlacement,
+		SeqPlacement:           c.SeqPlacement,
+		SessionKey:             c.SessionKey,
+		SeqKey:                 c.SeqKey,
+		UplinkDataPlacement:    c.UplinkDataPlacement,
+		UplinkDataKey:          c.UplinkDataKey,
+		UplinkChunkSize:        newRangeConfig(c.UplinkChunkSize),
+		NoGRPCHeader:           c.NoGRPCHeader,
+		NoSSEHeader:            c.NoSSEHeader,
+		BehaviorProfile:        c.BehaviorProfile,
+		ScMaxEachPostBytes:     newRangeConfig(c.ScMaxEachPostBytes),
+		ScMinPostsIntervalMs:   newRangeConfig(c.ScMinPostsIntervalMs),
+		ScMaxBufferedPosts:     c.ScMaxBufferedPosts,
+		ScStreamUpServerSecs:   newRangeConfig(c.ScStreamUpServerSecs),
+		ServerMaxHeaderBytes:   c.ServerMaxHeaderBytes,
+		SessionOpenTimeoutSecs: c.SessionOpenTimeoutSecs,
+		SessionIdleTimeoutSecs: c.SessionIdleTimeoutSecs,
 		Xmux: &splithttp.XmuxConfig{
 			MaxConcurrency:   newRangeConfig(c.Xmux.MaxConcurrency),
 			MaxConnections:   newRangeConfig(c.Xmux.MaxConnections),
