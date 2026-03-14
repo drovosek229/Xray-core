@@ -6,6 +6,7 @@ import (
 
 	. "github.com/xtls/xray-core/infra/conf"
 	"github.com/xtls/xray-core/transport/internet"
+	"github.com/xtls/xray-core/transport/internet/splithttp"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -154,5 +155,44 @@ func TestSocketConfig(t *testing.T) {
 	})
 	if expectedOutput.ParseTFOValue() != -1 {
 		t.Fatalf("unexpected parsed TFO value, which should be -1")
+	}
+}
+
+func TestSplitHTTPBehaviorProfileBuild(t *testing.T) {
+	legacyConfig := &SplitHTTPConfig{
+		Path: "/xhttp",
+	}
+	legacyMessage, err := legacyConfig.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyBuilt := legacyMessage.(*splithttp.Config)
+	if legacyBuilt.BehaviorProfile != splithttp.BehaviorProfileLegacy {
+		t.Fatalf("unexpected legacy behavior profile: %q", legacyBuilt.BehaviorProfile)
+	}
+	if legacyBuilt.XPaddingMethod != string(splithttp.PaddingMethodRepeatX) {
+		t.Fatalf("unexpected legacy xPaddingMethod: %q", legacyBuilt.XPaddingMethod)
+	}
+	if legacyBuilt.Xmux.GetMaxConcurrency().GetFrom() != 1 {
+		t.Fatalf("expected legacy xmux default maxConcurrency=1, got %d", legacyBuilt.Xmux.GetMaxConcurrency().GetFrom())
+	}
+
+	balancedConfig := &SplitHTTPConfig{
+		Path:            "/xhttp",
+		BehaviorProfile: splithttp.BehaviorProfileBalanced,
+	}
+	balancedMessage, err := balancedConfig.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	balancedBuilt := balancedMessage.(*splithttp.Config)
+	if balancedBuilt.BehaviorProfile != splithttp.BehaviorProfileBalanced {
+		t.Fatalf("unexpected balanced behavior profile: %q", balancedBuilt.BehaviorProfile)
+	}
+	if balancedBuilt.XPaddingMethod != string(splithttp.PaddingMethodTokenish) {
+		t.Fatalf("unexpected balanced xPaddingMethod: %q", balancedBuilt.XPaddingMethod)
+	}
+	if balancedBuilt.Xmux.GetMaxConcurrency().GetFrom() != 0 {
+		t.Fatalf("expected balanced xmux defaults to stay unset in config, got %d", balancedBuilt.Xmux.GetMaxConcurrency().GetFrom())
 	}
 }
