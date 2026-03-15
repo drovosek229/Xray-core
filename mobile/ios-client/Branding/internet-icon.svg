@@ -1,0 +1,43 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="112" y1="96" x2="896" y2="928" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#081321"/>
+      <stop offset="0.58" stop-color="#103259"/>
+      <stop offset="1" stop-color="#1D6F8B"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(338 248) rotate(47.4) scale(532 402)">
+      <stop stop-color="#A7E8FF" stop-opacity="0.58"/>
+      <stop offset="1" stop-color="#A7E8FF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ocean" x1="292" y1="254" x2="744" y2="756" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#69D1FF"/>
+      <stop offset="0.52" stop-color="#2E8EFF"/>
+      <stop offset="1" stop-color="#1CCFC0"/>
+    </linearGradient>
+    <linearGradient id="land" x1="360" y1="368" x2="688" y2="696" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#C8FF9C"/>
+      <stop offset="1" stop-color="#54D98B"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="56" y="56" width="912" height="912" rx="220" fill="url(#bg)"/>
+  <rect x="56" y="56" width="912" height="912" rx="220" fill="url(#glow)"/>
+
+  <circle cx="512" cy="512" r="282" fill="url(#ocean)"/>
+  <circle cx="512" cy="512" r="282" stroke="white" stroke-opacity="0.12" stroke-width="12"/>
+
+  <g opacity="0.24" stroke="#E7FBFF" stroke-width="14">
+    <ellipse cx="512" cy="512" rx="220" ry="282"/>
+    <ellipse cx="512" cy="512" rx="120" ry="282"/>
+    <path d="M230 512H794"/>
+    <path d="M268 408C334 448 416 470 512 470C608 470 690 448 756 408"/>
+    <path d="M268 616C334 576 416 554 512 554C608 554 690 576 756 616"/>
+  </g>
+
+  <path d="M372 368C338 390 324 442 344 486C364 530 416 544 464 530C498 520 530 494 538 456C546 420 526 384 494 360C456 332 406 346 372 368Z" fill="url(#land)"/>
+  <path d="M576 364C546 382 534 420 544 450C556 482 590 500 624 496C652 494 678 478 692 452C708 420 704 378 676 354C650 332 606 346 576 364Z" fill="url(#land)"/>
+  <path d="M488 596C450 616 428 654 434 690C442 732 482 766 524 772C576 780 630 748 646 698C658 660 644 616 610 592C576 566 526 576 488 596Z" fill="url(#land)"/>
+
+  <circle cx="396" cy="330" r="28" fill="#F8FEFF" fill-opacity="0.92"/>
+  <circle cx="396" cy="330" r="14" fill="#C3EEFF"/>
+</svg>

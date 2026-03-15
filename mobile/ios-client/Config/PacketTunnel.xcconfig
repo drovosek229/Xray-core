@@ -1,0 +1,4 @@
+#include "Common.xcconfig"
+
+PRODUCT_NAME = internetTunnel
+PRODUCT_BUNDLE_IDENTIFIER = $(PACKET_TUNNEL_BUNDLE_IDENTIFIER)

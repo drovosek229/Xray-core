@@ -66,3 +66,12 @@ ehthumbs.db
 # Other common ignores
 *.bak
 *.tmp
+
+# iOS / Xcode local-only artifacts
+*.xcuserstate
+*.pbxuser
+mobile/ios-client/.build/
+mobile/ios-client/.swiftpm/
+mobile/ios-client/Config/Local.xcconfig
+mobile/ios-client/Frameworks/XrayCore.xcframework/
+mobile/ios-client/XrayIOSClient.xcodeproj/

@@ -1,0 +1,73 @@
+name: XrayIOSClient
+options:
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+packages:
+  XrayAppCore:
+    path: .
+  Tun2SocksKit:
+    url: https://github.com/EbrahimTahernejad/Tun2SocksKit
+    from: 5.14.4
+targets:
+  XrayIOSClient:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    configFiles:
+      Debug: Config/App.xcconfig
+      Release: Config/App.xcconfig
+    sources:
+      - path: App/Sources
+      - path: App/Resources
+      - path: Shared/Sources
+    settings:
+      base:
+        CODE_SIGN_STYLE: Automatic
+        INFOPLIST_FILE: Config/App-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Config/App.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    dependencies:
+      - target: PacketTunnel
+        embed: true
+      - package: XrayAppCore
+        product: XrayAppCore
+  PacketTunnel:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    configFiles:
+      Debug: Config/PacketTunnel.xcconfig
+      Release: Config/PacketTunnel.xcconfig
+    sources:
+      - path: PacketTunnel/Sources
+      - path: Shared/Sources
+    settings:
+      base:
+        CODE_SIGN_STYLE: Automatic
+        INFOPLIST_FILE: Config/PacketTunnel-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Config/PacketTunnel.entitlements
+        FRAMEWORK_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/Frameworks"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+          - "@executable_path/../../Frameworks"
+          - "@loader_path/Frameworks"
+          - "@loader_path/../../Frameworks"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-framework"
+          - "XrayCore"
+    dependencies:
+      - package: XrayAppCore
+        product: XrayAppCore
+      - package: Tun2SocksKit
+        product: Tun2SocksKit
+      - framework: Frameworks/XrayCore.xcframework
+      - sdk: libresolv.9.tbd

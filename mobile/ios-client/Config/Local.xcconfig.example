@@ -1,0 +1,10 @@
+// Copy this file to Local.xcconfig for local-only signing and identifier overrides.
+// Local.xcconfig is gitignored.
+
+DEVELOPMENT_TEAM_ID = ABCDE12345
+
+APP_BUNDLE_IDENTIFIER = com.example.internet
+PACKET_TUNNEL_BUNDLE_IDENTIFIER = com.example.internet.PacketTunnel
+APP_GROUP_IDENTIFIER = group.com.example.internet
+SHARED_KEYCHAIN_SERVICE = com.example.internet
+SHARED_KEYCHAIN_SUFFIX = com.example.internet.shared

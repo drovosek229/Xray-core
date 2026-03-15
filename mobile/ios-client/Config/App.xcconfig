@@ -1,0 +1,4 @@
+#include "Common.xcconfig"
+
+PRODUCT_NAME = internet
+PRODUCT_BUNDLE_IDENTIFIER = $(APP_BUNDLE_IDENTIFIER)
