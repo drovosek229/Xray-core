@@ -1,5 +1,18 @@
 import Foundation
 
+struct HTTPSOCKSProxyConfiguration: Sendable {
+    let host: String
+    let port: Int
+
+    var connectionProxyDictionary: [AnyHashable: Any] {
+        [
+            "SOCKSEnable": true,
+            "SOCKSProxy": host,
+            "SOCKSPort": port,
+        ]
+    }
+}
+
 enum BenchmarkRunner {
     static func run(
         url: URL,
@@ -23,6 +36,16 @@ enum BenchmarkRunner {
             sessionTimings: sessionTimings
         )
     }
+
+    static func measure(
+        url: URL,
+        timeout: TimeInterval,
+        socksProxy: HTTPSOCKSProxyConfiguration?
+    ) async throws -> HTTPBenchmarkSample {
+        let runner = HTTPBenchmarkSession(timeout: timeout, socksProxy: socksProxy)
+        defer { runner.invalidate() }
+        return try await runner.measure(url: url)
+    }
 }
 
 private final class HTTPBenchmarkSession: NSObject, URLSessionTaskDelegate, URLSessionDataDelegate {
@@ -37,12 +60,13 @@ private final class HTTPBenchmarkSession: NSObject, URLSessionTaskDelegate, URLS
     private var metricsByTaskID: [Int: URLSessionTaskMetrics] = [:]
     private var statusCodes: [Int: Int] = [:]
 
-    init(timeout: TimeInterval) {
+    init(timeout: TimeInterval, socksProxy: HTTPSOCKSProxyConfiguration? = nil) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = timeout
         configuration.timeoutIntervalForResource = timeout
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.waitsForConnectivity = false
+        configuration.connectionProxyDictionary = socksProxy?.connectionProxyDictionary
         super.init()
         self.session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }

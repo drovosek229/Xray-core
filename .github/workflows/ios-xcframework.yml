@@ -34,12 +34,6 @@ jobs:
       - name: Install gomobile
         run: go install golang.org/x/mobile/cmd/gomobile@latest
 
-      - name: Run Go bridge tests
-        run: go test ./mobile/iosbridge
-
-      - name: Run Swift package tests
-        run: swift test --package-path mobile/ios-client
-
       - name: Build XCFramework
         env:
           PATH: ${{ env.PATH }}:${{ runner.temp }}

@@ -374,7 +374,7 @@ final class AppModel: ObservableObject {
 
         do {
             try latencyStore.saveRecords(latencyRecords)
-            appendLog("Measured latency for \(results.count) profile\(results.count == 1 ? "" : "s")")
+            appendLog("Measured Cloudflare probe time for \(results.count) profile\(results.count == 1 ? "" : "s")")
         } catch {
             setError(error)
         }
@@ -421,11 +421,11 @@ final class AppModel: ObservableObject {
         let record = latencyRecord(for: profileID)
         switch record.state {
         case .idle:
-            return "Latency not measured"
+            return "Cloudflare probe not measured"
         case .available:
-            return record.latencyMs.map { "\($0) milliseconds" } ?? "Latency measured"
+            return record.latencyMs.map { "Cloudflare probe \($0) milliseconds" } ?? "Cloudflare probe measured"
         case .failed:
-            return record.detail ?? "Latency check failed"
+            return record.detail ?? "Cloudflare probe failed"
         }
     }
 
@@ -648,7 +648,7 @@ final class AppModel: ObservableObject {
 
         do {
             try latencyStore.saveRecords(latencyRecords)
-            appendLog("Measured latency for \(logLabel)")
+            appendLog("Measured Cloudflare probe time for \(logLabel)")
         } catch {
             setError(error)
         }

@@ -197,15 +197,6 @@ private func profilePath(_ profile: ResolvedProfile) -> String {
     }
 }
 
-private func profileClassification(_ profile: ResolvedProfile) -> ProfileClassification {
-    switch profile {
-    case let .manual(manual):
-        return manual.classification
-    case let .subscriptionEndpoint(endpoint):
-        return endpoint.classification
-    }
-}
-
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var selectedTab: RootTab = .home
@@ -461,7 +452,7 @@ private struct HomeView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("↓ \(model.subscriptionEndpoints.count) imported • ↑ \(model.manualProfiles.count) local")
             if model.isTestingLatency {
-                Text("Testing latency…")
+                Text("Probing Cloudflare…")
             } else if model.isRefreshingSubscriptions {
                 Text("Refreshing subscriptions…")
             }
@@ -557,7 +548,7 @@ private struct SettingsView: View {
                             await model.testAllLatencies(force: true)
                         }
                     } label: {
-                        Label("Test Latency", systemImage: "speedometer")
+                        Label("Run Cloudflare Probe", systemImage: "speedometer")
                     }
 
                     Button {
@@ -1156,7 +1147,6 @@ private struct ProfileGroupCard: View {
                                 row: row,
                                 isSelected: activeTunnelTarget == row.reference,
                                 subtitle: subtitle(row.resolvedProfile),
-                                classification: profileClassification(row.resolvedProfile),
                                 latency: latencyText(row.id),
                                 latencyLabel: latencyLabel(row.id),
                                 isEditing: isEditing,
@@ -1183,7 +1173,7 @@ private struct ProfileGroupCard: View {
             Button {
                 testSectionLatency()
             } label: {
-                Label("Test Latency", systemImage: "speedometer")
+                Label("Run Probe", systemImage: "speedometer")
             }
 
             if section.source != nil {
@@ -1239,7 +1229,6 @@ private struct ProfileRowView: View {
     let row: HomeProfileRow
     let isSelected: Bool
     let subtitle: String
-    let classification: ProfileClassification
     let latency: String
     let latencyLabel: String
     let isEditing: Bool
@@ -1256,20 +1245,9 @@ private struct ProfileRowView: View {
                 .frame(width: 10, height: 10)
 
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(row.title)
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white)
-                    if classification == .recommendedFast {
-                        Text(classification.displayName.uppercased())
-                            .font(.system(size: 7, weight: .bold, design: .rounded))
-                            .foregroundStyle(Color(red: 0.10, green: 0.12, blue: 0.16))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Color(red: 0.66, green: 0.92, blue: 0.78))
-                            .clipShape(Capsule())
-                    }
-                }
+                Text(row.title)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white)
                 Text(subtitle)
                     .font(.system(size: 9, weight: .regular, design: .rounded))
                     .foregroundStyle(.white.opacity(0.42))
@@ -1305,7 +1283,7 @@ private struct ProfileRowView: View {
             Button {
                 onTestLatency()
             } label: {
-                Label("Test Latency", systemImage: "speedometer")
+                Label("Run Probe", systemImage: "speedometer")
             }
 
             Button {

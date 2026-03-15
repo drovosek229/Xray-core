@@ -1,37 +1,24 @@
 import Foundation
 import Network
-import Security
 import XrayAppCore
 
 struct ProfileLatencyTarget: Sendable {
     let id: UUID
-    let host: String
-    let port: Int
-    let securityKind: ProfileSecurityKind
-    let tlsSettings: TLSSecuritySettings?
+    let profile: ResolvedProfile
+    let localSocksPort: Int
 }
 
 enum LatencyProber {
     static func targets(from profiles: [ResolvedProfile]) -> [ProfileLatencyTarget] {
-        profiles.compactMap { profile in
-            switch profile {
-            case let .manual(manual):
-                return target(
-                    id: manual.id,
-                    address: manual.address,
-                    port: manual.port,
-                    securityKind: manual.securityKind,
-                    tlsSettings: manual.tlsSettings
-                )
-            case let .subscriptionEndpoint(endpoint):
-                return target(
-                    id: endpoint.id,
-                    address: endpoint.address,
-                    port: endpoint.port,
-                    securityKind: endpoint.securityKind,
-                    tlsSettings: endpoint.tlsSettings
-                )
+        profiles.enumerated().compactMap { index, profile in
+            guard isProfileProbeable(profile) else {
+                return nil
             }
+            return ProfileLatencyTarget(
+                id: profileID(for: profile),
+                profile: profile,
+                localSocksPort: AppConfiguration.latencyProbeLocalSocksPortBase + index
+            )
         }
     }
 
@@ -71,44 +58,45 @@ enum LatencyProber {
         return results
     }
 
-    private static func target(
-        id: UUID,
-        address: String,
-        port: Int,
-        securityKind: ProfileSecurityKind,
-        tlsSettings: TLSSecuritySettings?
-    ) -> ProfileLatencyTarget? {
-        let normalizedAddress = address.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedAddress.isEmpty, (1...65535).contains(port) else {
-            return nil
-        }
-        return ProfileLatencyTarget(
-            id: id,
-            host: normalizedAddress,
-            port: port,
-            securityKind: securityKind,
-            tlsSettings: tlsSettings
-        )
-    }
-
     private static func probe(
         target: ProfileLatencyTarget,
         timeout: TimeInterval
     ) async -> ProfileLatencyRecord {
         do {
-            let latencyMs: Int
-            switch target.securityKind {
-            case .reality:
-                latencyMs = try await measureTCPReady(host: target.host, port: target.port, timeout: timeout)
-            case .tls:
-                latencyMs = try await measureTLSReady(target: target, timeout: timeout)
+            guard let probeURL = URL(string: AppConfiguration.latencyProbeURLString) else {
+                throw LatencyProbeError.invalidProbeURL
             }
 
+            let configJSON = try buildRuntimeConfig(
+                for: target.profile,
+                localSocksPort: target.localSocksPort
+            )
+
+            let bridge = XrayEngineBridge()
+            try bridge.validate(configJSON: configJSON)
+            try bridge.start(configJSON: configJSON)
+            defer { bridge.stop() }
+
+            try await waitUntilSOCKSReady(
+                host: AppConfiguration.localSocksListenAddress,
+                port: target.localSocksPort,
+                timeout: min(timeout, 1.5)
+            )
+
+            let sample = try await BenchmarkRunner.measure(
+                url: probeURL,
+                timeout: timeout,
+                socksProxy: HTTPSOCKSProxyConfiguration(
+                    host: AppConfiguration.localSocksListenAddress,
+                    port: target.localSocksPort
+                )
+            )
+
             return ProfileLatencyRecord(
-                latencyMs: latencyMs,
+                latencyMs: sample.totalMs,
                 state: .available,
                 measuredAt: Date(),
-                detail: nil
+                detail: probeURL.absoluteString
             )
         } catch {
             return ProfileLatencyRecord(
@@ -120,58 +108,73 @@ enum LatencyProber {
         }
     }
 
-    private static func measureTCPReady(host: String, port: Int, timeout: TimeInterval) async throws -> Int {
-        try await measureConnection(
-            host: host,
-            port: port,
-            parameters: .tcp,
-            timeout: timeout
+    private static func buildRuntimeConfig(
+        for profile: ResolvedProfile,
+        localSocksPort: Int
+    ) throws -> String {
+        let context = RuntimeConfigContext(
+            dnsServers: AppConfiguration.runtimeDoHServers,
+            localSocksListenAddress: AppConfiguration.localSocksListenAddress,
+            localSocksListenPort: localSocksPort
         )
+
+        switch profile {
+        case let .manual(manual):
+            return try RuntimeConfigBuilder.build(for: manual, context: context)
+        case let .subscriptionEndpoint(endpoint):
+            return try RuntimeConfigBuilder.build(for: endpoint, context: context)
+        }
     }
 
-    private static func measureTLSReady(target: ProfileLatencyTarget, timeout: TimeInterval) async throws -> Int {
-        let tlsOptions = NWProtocolTLS.Options()
-        let securityOptions = tlsOptions.securityProtocolOptions
-
-        let peerName = target.tlsSettings?.verifyPeerCertByName
-            ?? target.tlsSettings?.serverName
-            ?? target.host
-        if !peerName.isEmpty {
-            sec_protocol_options_set_tls_server_name(securityOptions, peerName)
+    private static func profileID(for profile: ResolvedProfile) -> UUID {
+        switch profile {
+        case let .manual(manual):
+            return manual.id
+        case let .subscriptionEndpoint(endpoint):
+            return endpoint.id
         }
-
-        for protocolName in target.tlsSettings?.alpn ?? [] {
-            sec_protocol_options_add_tls_application_protocol(securityOptions, protocolName)
-        }
-
-        if target.tlsSettings?.allowInsecure == true {
-            sec_protocol_options_set_verify_block(securityOptions, { _, _, complete in
-                complete(true)
-            }, DispatchQueue.global(qos: .utility))
-        }
-
-        let parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
-        return try await measureConnection(
-            host: target.host,
-            port: target.port,
-            parameters: parameters,
-            timeout: timeout
-        )
     }
 
-    private static func measureConnection(
+    private static func isProfileProbeable(_ profile: ResolvedProfile) -> Bool {
+        switch profile {
+        case let .manual(manual):
+            return !manual.address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && (1...65535).contains(manual.port)
+        case let .subscriptionEndpoint(endpoint):
+            return !endpoint.address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && (1...65535).contains(endpoint.port)
+        }
+    }
+
+    private static func waitUntilSOCKSReady(
         host: String,
         port: Int,
-        parameters: NWParameters,
         timeout: TimeInterval
-    ) async throws -> Int {
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            do {
+                _ = try await measureTCPReady(
+                    host: host,
+                    port: port,
+                    timeout: min(0.25, max(0.05, deadline.timeIntervalSinceNow))
+                )
+                return
+            } catch {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
+        throw LatencyProbeError.timeout
+    }
+
+    private static func measureTCPReady(host: String, port: Int, timeout: TimeInterval) async throws -> Int {
         guard let endpointPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
             throw LatencyProbeError.invalidPort
         }
 
         return try await withCheckedThrowingContinuation { continuation in
-            let connection = NWConnection(host: NWEndpoint.Host(host), port: endpointPort, using: parameters)
-            let queue = DispatchQueue(label: "internet.latency.\(UUID().uuidString)")
+            let connection = NWConnection(host: NWEndpoint.Host(host), port: endpointPort, using: .tcp)
+            let queue = DispatchQueue(label: "internet.probe.ready.\(UUID().uuidString)")
             let start = DispatchTime.now()
             let finishState = FinishState()
 
@@ -189,8 +192,7 @@ enum LatencyProber {
                 switch state {
                 case .ready:
                     let elapsedNs = DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
-                    let latencyMs = Int(elapsedNs / 1_000_000)
-                    finish(.success(max(1, latencyMs)))
+                    finish(.success(max(1, Int(elapsedNs / 1_000_000))))
                 case let .failed(error):
                     finish(.failure(error))
                 case .cancelled:
@@ -214,15 +216,18 @@ private final class FinishState: @unchecked Sendable {
 
 private enum LatencyProbeError: LocalizedError {
     case invalidPort
+    case invalidProbeURL
     case timeout
     case cancelled
 
     var errorDescription: String? {
         switch self {
         case .invalidPort:
-            return "Invalid port."
+            return "Invalid probe port."
+        case .invalidProbeURL:
+            return "Invalid Cloudflare probe URL."
         case .timeout:
-            return "Timed out."
+            return "Timed out while probing Cloudflare."
         case .cancelled:
             return "Cancelled."
         }

@@ -59,6 +59,8 @@ enum AppConfiguration {
     static let latencyRefreshInterval: TimeInterval = 15 * 60
     static let latencyProbeTimeout: TimeInterval = 4
     static let latencyProbeMaxConcurrent = 4
+    static let latencyProbeURLString = "https://cp.cloudflare.com/generate_204"
+    static let latencyProbeLocalSocksPortBase = 21_080
     static let defaultDNSServers = ["198.18.0.1"]
     static let localSocksListenAddress = "127.0.0.1"
     static let localSocksListenPort = 10_808
@@ -67,7 +69,7 @@ enum AppConfiguration {
         "https+local://1.0.0.1/dns-query",
     ]
     static let defaultTunnelMTU = 1280
-    static let benchmarkProbeURLString = "https://www.cloudflare.com/cdn-cgi/trace"
+    static let benchmarkProbeURLString = latencyProbeURLString
     static let benchmarkRequestTimeout: TimeInterval = 15
     static let xrayLogFileName = "xray.log"
     static let eventsLogFileName = "client-events.log"
