@@ -396,7 +396,7 @@ func (s *Instance) Start() error {
 		}
 	}
 
-	errors.LogWarning(s.ctx, "Xray ", Version(), " started")
+	errors.LogWarning(s.ctx, ProductName(), " ", Version(), " started")
 
 	return nil
 }

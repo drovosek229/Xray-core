@@ -132,7 +132,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)? = nil) {
         let version = stateQueue.sync { supervisorState.currentGeneration?.bridge.version() } ?? XrayEngineBridge().version()
-        completionHandler?("Xray Engine \(version)".data(using: .utf8))
+        completionHandler?("internet core \(version)".data(using: .utf8))
     }
 
     private func applyInitialTunnelSettings(
