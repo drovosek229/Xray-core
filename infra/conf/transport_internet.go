@@ -258,6 +258,7 @@ type XmuxConfig struct {
 	HMaxRequestTimes Int32Range `json:"hMaxRequestTimes"`
 	HMaxReusableSecs Int32Range `json:"hMaxReusableSecs"`
 	HKeepAlivePeriod int64      `json:"hKeepAlivePeriod"`
+	WarmConnections  int32      `json:"warmConnections"`
 }
 
 func newRangeConfig(input Int32Range) *splithttp.RangeConfig {
@@ -457,6 +458,7 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 			HMaxRequestTimes: newRangeConfig(c.Xmux.HMaxRequestTimes),
 			HMaxReusableSecs: newRangeConfig(c.Xmux.HMaxReusableSecs),
 			HKeepAlivePeriod: c.Xmux.HKeepAlivePeriod,
+			WarmConnections:  c.Xmux.WarmConnections,
 		},
 	}
 

@@ -610,30 +610,55 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 func getConfiguredXmux(config *Config, httpVersion string) XmuxConfig {
 	if config.Xmux != nil && !isZeroXmuxConfig(*config.Xmux) {
-		return *config.Xmux
+		xmuxConfig := *config.Xmux
+		if httpVersion == "1.1" {
+			xmuxConfig.WarmConnections = 0
+			return xmuxConfig
+		}
+		if xmuxConfig.WarmConnections > 0 && xmuxConfig.HKeepAlivePeriod == 0 {
+			xmuxConfig.HKeepAlivePeriod = 30
+		}
+		return xmuxConfig
 	}
 	if !config.IsBalancedBehaviorProfile() {
 		if config.Xmux != nil {
-			return *config.Xmux
+			xmuxConfig := *config.Xmux
+			if httpVersion == "1.1" {
+				xmuxConfig.WarmConnections = 0
+				return xmuxConfig
+			}
+			if xmuxConfig.WarmConnections > 0 && xmuxConfig.HKeepAlivePeriod == 0 {
+				xmuxConfig.HKeepAlivePeriod = 30
+			}
+			return xmuxConfig
 		}
 		return XmuxConfig{}
 	}
 
+	var xmuxConfig XmuxConfig
 	switch httpVersion {
 	case "1.1":
-		return XmuxConfig{
+		xmuxConfig = XmuxConfig{
 			MaxConcurrency:   &RangeConfig{From: 1, To: 1},
 			HMaxRequestTimes: &RangeConfig{From: 32, To: 96},
 			HMaxReusableSecs: &RangeConfig{From: 45, To: 180},
 		}
 	default:
-		return XmuxConfig{
+		xmuxConfig = XmuxConfig{
 			MaxConcurrency:   &RangeConfig{From: 1, To: 2},
 			HMaxRequestTimes: &RangeConfig{From: 400, To: 800},
 			HMaxReusableSecs: &RangeConfig{From: 1200, To: 2400},
 			HKeepAlivePeriod: 30,
 		}
 	}
+	if httpVersion == "1.1" {
+		xmuxConfig.WarmConnections = 0
+		return xmuxConfig
+	}
+	if xmuxConfig.WarmConnections > 0 && xmuxConfig.HKeepAlivePeriod == 0 {
+		xmuxConfig.HKeepAlivePeriod = 30
+	}
+	return xmuxConfig
 }
 
 func isZeroXmuxConfig(config XmuxConfig) bool {
@@ -646,7 +671,8 @@ func isZeroXmuxConfig(config XmuxConfig) bool {
 		isZeroRange(config.CMaxReuseTimes) &&
 		isZeroRange(config.HMaxRequestTimes) &&
 		isZeroRange(config.HMaxReusableSecs) &&
-		config.HKeepAlivePeriod == 0
+		config.HKeepAlivePeriod == 0 &&
+		config.WarmConnections == 0
 }
 
 func postPacketWithRetry(ctx context.Context, client DialerClient, config *Config, requestURL string, sessionID string, seqStr string, payload []byte, behavior *RequestBehavior) error {
