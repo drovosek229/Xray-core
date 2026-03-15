@@ -138,7 +138,6 @@ private func summaryChips(for profile: ResolvedProfile) -> [String] {
     switch profile {
     case let .manual(manual):
         var chips = [
-            manual.securityKind.displayName,
             manual.xhttpMode.displayName,
             manual.normalizedUplinkHTTPMethod,
             manual.behaviorProfile.displayName,
@@ -150,7 +149,6 @@ private func summaryChips(for profile: ResolvedProfile) -> [String] {
         return chips
     case let .subscriptionEndpoint(endpoint):
         var chips = [
-            endpoint.securityKind.displayName,
             endpoint.xhttpMode.displayName,
             endpoint.normalizedUplinkHTTPMethod,
             endpoint.behaviorProfile.displayName,
@@ -384,7 +382,7 @@ private struct HomeView: View {
 
             StatusPill(
                 text: displayedTunnelStatus,
-                isConnected: model.tunnelState == .connected || model.tunnelState == .reasserting
+                isConnected: model.tunnelPhase == .connected
             )
         }
         .frame(maxWidth: .infinity)
@@ -491,10 +489,14 @@ private struct HomeView: View {
     }
 
     private var powerButtonSymbol: String {
+        if model.tunnelPhase == .recovering {
+            return "hourglass"
+        }
+
         switch model.tunnelState {
-        case .connected, .reasserting:
+        case .connected:
             return "pause.fill"
-        case .connecting, .disconnecting:
+        case .connecting, .disconnecting, .reasserting:
             return "hourglass"
         default:
             return "play.fill"

@@ -460,9 +460,9 @@ final class AppModel: ObservableObject {
     func subtitle(for profile: ResolvedProfile) -> String {
         switch profile {
         case let .manual(manual):
-            return "VLESS / XHTTP / \(manual.securityKind.displayName)"
+            return "XHTTP / \(manual.securityKind.displayName)"
         case let .subscriptionEndpoint(endpoint):
-            return "VLESS / XHTTP / \(endpoint.securityKind.displayName)"
+            return "XHTTP / \(endpoint.securityKind.displayName)"
         }
     }
 
@@ -517,7 +517,7 @@ final class AppModel: ObservableObject {
 
     func runBenchmark() async {
         do {
-            guard tunnelState == .connected || tunnelState == .reasserting else {
+            guard tunnelState == .connected, tunnelPhase == .connected else {
                 throw XrayAppCoreError.invalidProfile("Connect the tunnel before running a benchmark.")
             }
             guard let activeProfile = currentResolvedActiveTarget() else {
@@ -694,11 +694,22 @@ final class AppModel: ObservableObject {
         connectionStartedAt = connectedDate
         tunnelRuntimeState = try? tunnelSessionStore.loadRuntimeState()
 
+        if tunnelRuntimeState?.phase == .recovering {
+            errorMessage = nil
+            tunnelPhase = .recovering
+            tunnelStatus = TunnelRuntimePhase.recovering.displayName
+            return
+        }
+
         switch status {
-        case .connected, .reasserting:
+        case .connected:
             errorMessage = nil
             tunnelPhase = .connected
             tunnelStatus = TunnelRuntimePhase.connected.displayName
+        case .reasserting:
+            errorMessage = nil
+            tunnelPhase = .starting
+            tunnelStatus = TunnelRuntimePhase.starting.displayName
         case .connecting:
             if tunnelPhase == .preparing {
                 tunnelStatus = TunnelRuntimePhase.preparing.displayName
@@ -716,6 +727,10 @@ final class AppModel: ObservableObject {
                 errorMessage = nil
                 tunnelPhase = tunnelRuntimeState?.phase ?? .starting
                 tunnelStatus = tunnelPhase.displayName
+            } else if tunnelRuntimeState?.phase == .failed {
+                errorMessage = nil
+                tunnelPhase = .failed
+                tunnelStatus = TunnelRuntimePhase.failed.displayName
             } else if tunnelRuntimeState?.isCleanStop == true || tunnelRuntimeState?.phase == .stopping {
                 errorMessage = nil
                 tunnelPhase = .idle

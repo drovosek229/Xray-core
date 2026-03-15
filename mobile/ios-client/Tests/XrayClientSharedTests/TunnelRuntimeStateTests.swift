@@ -41,4 +41,8 @@ final class TunnelRuntimeStateTests: XCTestCase {
         XCTAssertTrue(state.isCleanStop)
         XCTAssertTrue(state.isExternalStop)
     }
+
+    func testRecoveringPhaseHasRecoveringDisplayName() {
+        XCTAssertEqual(TunnelRuntimePhase.recovering.displayName, "Recovering")
+    }
 }

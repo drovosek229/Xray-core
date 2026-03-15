@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import XrayAppCore
 
@@ -6,6 +5,7 @@ enum TunnelRuntimePhase: String, Codable, Hashable, Sendable {
     case idle
     case preparing
     case starting
+    case recovering
     case connected
     case stopping
     case failed
@@ -18,6 +18,8 @@ enum TunnelRuntimePhase: String, Codable, Hashable, Sendable {
             return "Preparing"
         case .starting:
             return "Starting"
+        case .recovering:
+            return "Recovering"
         case .connected:
             return "Connected"
         case .stopping:
@@ -108,47 +110,12 @@ enum TunnelStopReason: Int, Codable, Hashable, Sendable {
     }
 }
 
-struct TunnelLaunchPayload: Codable, Hashable, Sendable {
-    var sessionID: UUID
-    var activeTunnelTarget: ProfileReference
-    var configJSON: String
-    var createdAt: Date
-    var targetName: String
-    var configHash: String
-
-    init(
-        sessionID: UUID = UUID(),
-        activeTunnelTarget: ProfileReference,
-        configJSON: String,
-        createdAt: Date = Date(),
-        targetName: String
-    ) {
-        self.sessionID = sessionID
-        self.activeTunnelTarget = activeTunnelTarget
-        self.configJSON = configJSON
-        self.createdAt = createdAt
-        self.targetName = targetName
-        self.configHash = Self.hash(for: configJSON)
-    }
-
-    var isExpired: Bool {
-        Date().timeIntervalSince(createdAt) > AppConfiguration.tunnelLaunchPayloadMaxAge
-    }
-
-    var hasValidHash: Bool {
-        configHash == Self.hash(for: configJSON)
-    }
-
-    static func hash(for configJSON: String) -> String {
-        SHA256.hash(data: Data(configJSON.utf8)).map { String(format: "%02x", $0) }.joined()
-    }
-}
-
 struct TunnelRuntimeState: Codable, Hashable, Sendable {
     var sessionID: UUID?
     var activeTunnelTarget: ProfileReference?
     var targetName: String?
     var phase: TunnelRuntimePhase
+    var runtimeStage: TunnelRuntimeStage?
     var createdAt: Date
     var startedAt: Date?
     var updatedAt: Date
@@ -158,12 +125,16 @@ struct TunnelRuntimeState: Codable, Hashable, Sendable {
     var stopReason: TunnelStopReason?
     var stopOrigin: TunnelStopOrigin?
     var lastKnownSystemStatus: TunnelSystemStatus?
+    var recoveryAttempt: Int?
+    var lastRecoveryTrigger: TunnelLocalFailureReason?
+    var lastHealthyAt: Date?
 
     init(
         sessionID: UUID? = nil,
         activeTunnelTarget: ProfileReference? = nil,
         targetName: String? = nil,
         phase: TunnelRuntimePhase,
+        runtimeStage: TunnelRuntimeStage? = nil,
         createdAt: Date = Date(),
         startedAt: Date? = nil,
         updatedAt: Date = Date(),
@@ -172,12 +143,16 @@ struct TunnelRuntimeState: Codable, Hashable, Sendable {
         performance: TunnelPerformanceTimings? = nil,
         stopReason: TunnelStopReason? = nil,
         stopOrigin: TunnelStopOrigin? = nil,
-        lastKnownSystemStatus: TunnelSystemStatus? = nil
+        lastKnownSystemStatus: TunnelSystemStatus? = nil,
+        recoveryAttempt: Int? = nil,
+        lastRecoveryTrigger: TunnelLocalFailureReason? = nil,
+        lastHealthyAt: Date? = nil
     ) {
         self.sessionID = sessionID
         self.activeTunnelTarget = activeTunnelTarget
         self.targetName = targetName
         self.phase = phase
+        self.runtimeStage = runtimeStage
         self.createdAt = createdAt
         self.startedAt = startedAt
         self.updatedAt = updatedAt
@@ -187,6 +162,9 @@ struct TunnelRuntimeState: Codable, Hashable, Sendable {
         self.stopReason = stopReason
         self.stopOrigin = stopOrigin
         self.lastKnownSystemStatus = lastKnownSystemStatus
+        self.recoveryAttempt = recoveryAttempt
+        self.lastRecoveryTrigger = lastRecoveryTrigger
+        self.lastHealthyAt = lastHealthyAt
     }
 
     var isCleanStop: Bool {
@@ -198,96 +176,13 @@ struct TunnelRuntimeState: Codable, Hashable, Sendable {
     }
 }
 
-enum TunnelSessionStoreError: LocalizedError, Equatable {
-    case missingLaunchPayload
-    case staleLaunchPayload
-    case launchPayloadSessionMismatch
-    case corruptedLaunchPayload
-
-    var errorDescription: String? {
-        switch self {
-        case .missingLaunchPayload:
-            return "Missing tunnel launch payload."
-        case .staleLaunchPayload:
-            return "Tunnel launch payload expired."
-        case .launchPayloadSessionMismatch:
-            return "Tunnel launch payload session mismatch."
-        case .corruptedLaunchPayload:
-            return "Tunnel launch payload integrity check failed."
-        }
-    }
-}
-
 final class TunnelSessionStore {
     private let appGroupStore: AppGroupStore
-    private let launchPayloadsFileURL: URL
     private let runtimeStateFileURL: URL
 
     init(appGroupStore: AppGroupStore = AppGroupStore()) {
         self.appGroupStore = appGroupStore
-        launchPayloadsFileURL = appGroupStore.fileURL(named: AppConfiguration.pendingTunnelLaunchPayloadFileName)
         runtimeStateFileURL = appGroupStore.fileURL(named: AppConfiguration.tunnelRuntimeStateFileName)
-    }
-
-    func saveLaunchPayload(_ payload: TunnelLaunchPayload) throws {
-        var payloads = loadLaunchPayloads()
-        payloads[payload.sessionID.uuidString.lowercased()] = payload
-        saveLaunchPayloads(payloads)
-    }
-
-    func loadLaunchPayload(expectedSessionID: UUID) throws -> TunnelLaunchPayload {
-        var payloads = loadLaunchPayloads()
-        let key = expectedSessionID.uuidString.lowercased()
-        guard let payload = payloads[key] else {
-            throw payloads.isEmpty ? TunnelSessionStoreError.missingLaunchPayload : TunnelSessionStoreError.launchPayloadSessionMismatch
-        }
-        guard !payload.isExpired else {
-            payloads.removeValue(forKey: key)
-            saveLaunchPayloads(payloads)
-            throw TunnelSessionStoreError.staleLaunchPayload
-        }
-        guard payload.hasValidHash else {
-            payloads.removeValue(forKey: key)
-            saveLaunchPayloads(payloads)
-            throw TunnelSessionStoreError.corruptedLaunchPayload
-        }
-        return payload
-    }
-
-    func loadMostRecentLaunchPayload() throws -> TunnelLaunchPayload? {
-        var payloads = loadLaunchPayloads()
-        guard !payloads.isEmpty else {
-            return nil
-        }
-
-        var latestPayload: TunnelLaunchPayload?
-        var needsSave = false
-        for (key, payload) in payloads.sorted(by: { $0.value.createdAt < $1.value.createdAt }) {
-            if payload.isExpired || !payload.hasValidHash {
-                payloads.removeValue(forKey: key)
-                needsSave = true
-                continue
-            }
-            latestPayload = payload
-        }
-
-        if needsSave {
-            saveLaunchPayloads(payloads)
-        }
-
-        return latestPayload
-    }
-
-    func clearLaunchPayload(sessionID: UUID? = nil) {
-        guard let sessionID else {
-            removeFile(at: launchPayloadsFileURL)
-            appGroupStore.removeValue(forKey: AppConfiguration.pendingTunnelLaunchPayloadKey)
-            return
-        }
-
-        var payloads = loadLaunchPayloads()
-        payloads.removeValue(forKey: sessionID.uuidString.lowercased())
-        saveLaunchPayloads(payloads)
     }
 
     func saveRuntimeState(_ state: TunnelRuntimeState) throws {
@@ -319,51 +214,6 @@ final class TunnelSessionStore {
     func clearRuntimeState() {
         removeFile(at: runtimeStateFileURL)
         appGroupStore.removeValue(forKey: AppConfiguration.tunnelRuntimeStateKey)
-    }
-
-    private func loadLaunchPayloads() -> [String: TunnelLaunchPayload] {
-        if let payloads: [String: TunnelLaunchPayload] = try? read(
-            [String: TunnelLaunchPayload].self,
-            from: launchPayloadsFileURL
-        ) {
-            return payloads
-        }
-
-        do {
-            if let payloads = try appGroupStore.load(
-                [String: TunnelLaunchPayload].self,
-                forKey: AppConfiguration.pendingTunnelLaunchPayloadKey
-            ) {
-                try? write(payloads, to: launchPayloadsFileURL)
-                appGroupStore.removeValue(forKey: AppConfiguration.pendingTunnelLaunchPayloadKey)
-                return payloads
-            }
-        } catch {
-        }
-
-        do {
-            if let legacyPayload = try appGroupStore.load(
-                TunnelLaunchPayload.self,
-                forKey: AppConfiguration.pendingTunnelLaunchPayloadKey
-            ) {
-                let payloads = [legacyPayload.sessionID.uuidString.lowercased(): legacyPayload]
-                saveLaunchPayloads(payloads)
-                return payloads
-            }
-        } catch {
-        }
-
-        return [:]
-    }
-
-    private func saveLaunchPayloads(_ payloads: [String: TunnelLaunchPayload]) {
-        if payloads.isEmpty {
-            removeFile(at: launchPayloadsFileURL)
-            appGroupStore.removeValue(forKey: AppConfiguration.pendingTunnelLaunchPayloadKey)
-            return
-        }
-        try? write(payloads, to: launchPayloadsFileURL)
-        appGroupStore.removeValue(forKey: AppConfiguration.pendingTunnelLaunchPayloadKey)
     }
 
     private func read<T: Decodable>(_ type: T.Type, from fileURL: URL) throws -> T? {

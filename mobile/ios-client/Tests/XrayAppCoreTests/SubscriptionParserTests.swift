@@ -41,7 +41,12 @@ final class SubscriptionParserTests: XCTestCase {
                   "path": "/assets",
                   "mode": "auto",
                   "behaviorProfile": "balanced",
-                  "uplinkHTTPMethod": "PATCH"
+                  "uplinkHTTPMethod": "PATCH",
+                  "xmux": {
+                    "warmConnections": 2,
+                    "hKeepAlivePeriod": 45,
+                    "maxConnections": "2-4"
+                  }
                 }
               }
             },
@@ -99,6 +104,9 @@ final class SubscriptionParserTests: XCTestCase {
         XCTAssertEqual(realityEndpoint.normalizedUplinkHTTPMethod, "PATCH")
         XCTAssertEqual(realityEndpoint.flow, "xtls-rprx-vision-udp443")
         XCTAssertEqual(realityEndpoint.normalizedEncryption, "mlkem768x25519plus.native.1rtt.keymaterial")
+        XCTAssertEqual(realityEndpoint.xhttpAdvancedSettings?.xmux?.warmConnections, 2)
+        XCTAssertEqual(realityEndpoint.xhttpAdvancedSettings?.xmux?.hKeepAlivePeriod, 45)
+        XCTAssertEqual(realityEndpoint.xhttpAdvancedSettings?.xmux?.maxConnections, "2-4")
 
         let tlsEndpoint = try XCTUnwrap(endpoints.first { $0.displayName == "tls-route" })
         XCTAssertEqual(tlsEndpoint.securityKind, .tls)
@@ -107,6 +115,7 @@ final class SubscriptionParserTests: XCTestCase {
         XCTAssertEqual(tlsEndpoint.tlsSettings?.alpn, ["h2", "h3"])
         XCTAssertEqual(tlsEndpoint.normalizedEncryption, "none")
         XCTAssertEqual(tlsEndpoint.metadata["tls_allow_insecure"], "true")
+        XCTAssertNil(tlsEndpoint.xhttpAdvancedSettings?.xmux)
     }
 
     func testParserParsesSampleFixtureFromRawLinksAndPreservesAdvancedXHTTPSettings() throws {

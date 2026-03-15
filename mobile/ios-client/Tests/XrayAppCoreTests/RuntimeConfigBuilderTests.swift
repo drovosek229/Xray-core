@@ -46,6 +46,9 @@ final class RuntimeConfigBuilderTests: XCTestCase {
         XCTAssertNotNil(streamSettings["realitySettings"] as? [String: Any])
         XCTAssertEqual(xhttpSettings["behaviorProfile"] as? String, "balanced")
         XCTAssertEqual(xhttpSettings["uplinkHTTPMethod"] as? String, "POST")
+        let xmux = try XCTUnwrap(xhttpSettings["xmux"] as? [String: Any])
+        XCTAssertEqual(xmux["warmConnections"] as? Int, 1)
+        XCTAssertEqual(xmux["hKeepAlivePeriod"] as? Int, 30)
         let settings = try XCTUnwrap(firstOutbound["settings"] as? [String: Any])
         let vnext = try XCTUnwrap(settings["vnext"] as? [[String: Any]])
         let users = try XCTUnwrap(vnext.first?["users"] as? [[String: Any]])
@@ -359,7 +362,12 @@ final class RuntimeConfigBuilderTests: XCTestCase {
                 xPaddingObfsMode: true,
                 noGRPCHeader: true,
                 noSSEHeader: false,
-                scMaxEachPostBytes: "16384"
+                scMaxEachPostBytes: "16384",
+                xmux: XHTTPXmuxSettings(
+                    maxConnections: "2-4",
+                    hKeepAlivePeriod: 45,
+                    warmConnections: 2
+                )
             )
         )
 
@@ -383,5 +391,9 @@ final class RuntimeConfigBuilderTests: XCTestCase {
         XCTAssertEqual(xhttpSettings["noGRPCHeader"] as? Bool, true)
         XCTAssertEqual(xhttpSettings["noSSEHeader"] as? Bool, false)
         XCTAssertEqual(xhttpSettings["scMaxEachPostBytes"] as? String, "16384")
+        let xmux = try XCTUnwrap(xhttpSettings["xmux"] as? [String: Any])
+        XCTAssertEqual(xmux["maxConnections"] as? String, "2-4")
+        XCTAssertEqual(xmux["hKeepAlivePeriod"] as? Int, 45)
+        XCTAssertEqual(xmux["warmConnections"] as? Int, 2)
     }
 }

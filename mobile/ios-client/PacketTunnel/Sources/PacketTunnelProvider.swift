@@ -1,36 +1,78 @@
 import Foundation
+import Network
 import NetworkExtension
+
+private struct LocalRuntimeGeneration {
+    let id: UUID
+    let bridge: XrayEngineBridge
+    let tun2Socks: Tun2SocksBridge
+}
+
+private struct LocalRuntimeStartResult {
+    let generation: LocalRuntimeGeneration
+    let performance: TunnelPerformanceTimings
+}
+
+private struct LocalRuntimeStartFailure: Error {
+    let reason: TunnelLocalFailureReason
+    let message: String
+    let performance: TunnelPerformanceTimings
+}
+
+private struct ProviderSupervisorState {
+    var activeConfiguration: TunnelProviderConfigurationEnvelope?
+    var currentGeneration: LocalRuntimeGeneration?
+    var isStopping = false
+    var isRecovering = false
+    var recoveryAttempt = 0
+    var hasEverConnected = false
+    var lastHealthyAt: Date?
+    var healthCheckInFlight = false
+    var healthTimer: DispatchSourceTimer?
+}
 
 final class PacketTunnelProvider: NEPacketTunnelProvider {
     private let logStore = LogStore()
     private let tunnelSessionStore = TunnelSessionStore()
-    private lazy var bridge = XrayEngineBridge()
-    private let tun2SocksBridge = Tun2SocksBridge()
+    private let recoveryPolicy = TunnelRecoveryPolicy.default
     private let stateQueue = DispatchQueue(label: "internet.packet-tunnel.state")
-    private var isStopping = false
+    private let healthQueue = DispatchQueue(label: "internet.packet-tunnel.health")
+    private let pathMonitorQueue = DispatchQueue(label: "internet.packet-tunnel.path")
+
+    private var supervisorState = ProviderSupervisorState()
+    private var pathMonitor: NWPathMonitor?
 
     override func startTunnel(
         options _: [String: NSObject]?,
         completionHandler: @escaping (Error?) -> Void
     ) {
         stateQueue.sync {
-            isStopping = false
+            supervisorState = ProviderSupervisorState()
+            supervisorState.isStopping = false
         }
+        startPathMonitorIfNeeded()
 
         do {
             let providerConfiguration = try loadProviderConfigurationEnvelope()
+            stateQueue.sync {
+                supervisorState.activeConfiguration = providerConfiguration
+            }
             writeRuntimeState(
                 for: providerConfiguration,
                 phase: .starting,
+                runtimeStage: .startup,
                 lastKnownSystemStatus: .connecting
             )
-            startTunnel(with: providerConfiguration, completionHandler: completionHandler)
+            applyInitialTunnelSettings(
+                for: providerConfiguration,
+                completionHandler: completionHandler
+            )
         } catch {
             let runtimeState: TunnelRuntimeState
             if Self.isCleanExternalStartError(error) {
                 runtimeState = TunnelRuntimeState(
                     phase: .idle,
-                    stopReason: .none,
+                    stopReason: TunnelStopReason.none,
                     stopOrigin: .system,
                     lastKnownSystemStatus: .disconnected
                 )
@@ -38,6 +80,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             } else {
                 runtimeState = TunnelRuntimeState(
                     phase: .failed,
+                    runtimeStage: .startup,
                     lastError: error.localizedDescription,
                     stopOrigin: .launchFailure,
                     lastKnownSystemStatus: .invalid
@@ -51,15 +94,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         stateQueue.sync {
-            isStopping = true
+            supervisorState.isStopping = true
+            stopHealthMonitorLocked()
+            stopCurrentRuntimeLocked()
         }
+        stopPathMonitor()
 
         let previousState = try? tunnelSessionStore.loadRuntimeState()
         let stopReason = TunnelStopReason(rawValue: reason.rawValue) ?? .unknown
         let classification = stopReason.classify(previousState: previousState)
-
-        tun2SocksBridge.stop()
-        bridge.stop()
 
         try? tunnelSessionStore.saveRuntimeState(
             TunnelRuntimeState(
@@ -67,6 +110,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 activeTunnelTarget: previousState?.activeTunnelTarget,
                 targetName: previousState?.targetName,
                 phase: classification.phase,
+                runtimeStage: previousState?.runtimeStage,
                 createdAt: previousState?.createdAt ?? Date(),
                 startedAt: previousState?.startedAt,
                 lastError: classification.phase == .failed
@@ -76,7 +120,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 performance: previousState?.performance,
                 stopReason: stopReason,
                 stopOrigin: classification.origin,
-                lastKnownSystemStatus: .disconnected
+                lastKnownSystemStatus: .disconnected,
+                recoveryAttempt: previousState?.recoveryAttempt,
+                lastRecoveryTrigger: previousState?.lastRecoveryTrigger,
+                lastHealthyAt: previousState?.lastHealthyAt
             )
         )
         logStore.append("Tunnel stopped with reason \(stopReason.rawValue)")
@@ -84,131 +131,488 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)? = nil) {
-        let response = "Xray Engine \(bridge.version())".data(using: .utf8)
-        completionHandler?(response)
+        let version = stateQueue.sync { supervisorState.currentGeneration?.bridge.version() } ?? XrayEngineBridge().version()
+        completionHandler?("Xray Engine \(version)".data(using: .utf8))
     }
 
-    private func startTunnel(
-        with providerConfiguration: TunnelProviderConfigurationEnvelope,
+    private func applyInitialTunnelSettings(
+        for providerConfiguration: TunnelProviderConfigurationEnvelope,
         completionHandler: @escaping (Error?) -> Void
     ) {
         let settings = makeTunnelSettings(routePolicy: providerConfiguration.routePolicy)
         let settingsStartedAt = DispatchTime.now()
-        setTunnelNetworkSettings(settings) { [weak self, providerConfiguration] error in
+        setTunnelNetworkSettings(settings) { [weak self] error in
             guard let self else {
                 completionHandler(nil)
                 return
             }
 
             let settingsDurationMs = Self.elapsedMilliseconds(since: settingsStartedAt)
-            if let error {
-                self.writeRuntimeState(
-                    for: providerConfiguration,
-                    phase: .failed,
-                    lastError: error.localizedDescription,
-                    performance: TunnelPerformanceTimings(
-                        setTunnelNetworkSettingsMs: settingsDurationMs
-                    ),
-                    stopOrigin: .launchFailure,
-                    lastKnownSystemStatus: .invalid
-                )
-                self.logStore.append("Failed to apply tunnel settings in \(settingsDurationMs)ms: \(error.localizedDescription)")
-                completionHandler(error)
-                return
-            }
-
-            do {
-                let validateStartedAt = DispatchTime.now()
-                try self.bridge.validate(configJSON: providerConfiguration.runtimeConfigJSON)
-                let validateDurationMs = Self.elapsedMilliseconds(since: validateStartedAt)
-
-                let engineStartedAt = DispatchTime.now()
-                try self.bridge.start(
-                    configJSON: providerConfiguration.runtimeConfigJSON,
-                    tunFD: -1,
-                    assetDir: Bundle.main.resourceURL?.path ?? ""
-                )
-                let engineStartDurationMs = Self.elapsedMilliseconds(since: engineStartedAt)
-
-                let tun2SocksStartedAt = DispatchTime.now()
-                self.tun2SocksBridge.start(
-                    configuration: Tun2SocksConfiguration(
-                        socksAddress: AppConfiguration.localSocksListenAddress,
-                        socksPort: AppConfiguration.localSocksListenPort,
-                        mtu: AppConfiguration.defaultTunnelMTU
+            self.stateQueue.async {
+                if let error {
+                    self.writeRuntimeState(
+                        for: providerConfiguration,
+                        phase: .failed,
+                        runtimeStage: .startup,
+                        lastError: error.localizedDescription,
+                        performance: TunnelPerformanceTimings(
+                            setTunnelNetworkSettingsMs: settingsDurationMs
+                        ),
+                        stopOrigin: .launchFailure,
+                        lastKnownSystemStatus: .invalid
                     )
-                ) { [weak self] code in
-                    self?.handleTun2SocksExit(
-                        code: code,
-                        providerConfiguration: providerConfiguration
-                    )
+                    self.logStore.append("Failed to apply tunnel settings in \(settingsDurationMs)ms: \(error.localizedDescription)")
+                    completionHandler(error)
+                    return
                 }
-                let tun2SocksStartDurationMs = Self.elapsedMilliseconds(since: tun2SocksStartedAt)
 
-                self.writeRuntimeState(
-                    for: providerConfiguration,
-                    phase: .connected,
-                    startedAt: Date(),
-                    performance: TunnelPerformanceTimings(
-                        setTunnelNetworkSettingsMs: settingsDurationMs,
-                        configValidateMs: validateDurationMs,
-                        xrayEngineStartMs: engineStartDurationMs,
-                        tun2SocksStartMs: tun2SocksStartDurationMs
-                    ),
-                    lastKnownSystemStatus: .connected
-                )
-                self.logStore.append(
-                    "Tunnel started with \(providerConfiguration.targetName) using engine version \(self.bridge.version()) "
-                        + "[settings \(settingsDurationMs)ms, validate \(validateDurationMs)ms, engine \(engineStartDurationMs)ms, tun2socks \(tun2SocksStartDurationMs)ms]"
-                )
-                completionHandler(nil)
-            } catch {
-                self.tun2SocksBridge.stop()
-                self.bridge.stop()
-                self.writeRuntimeState(
-                    for: providerConfiguration,
-                    phase: .failed,
-                    lastError: error.localizedDescription,
-                    performance: TunnelPerformanceTimings(
-                        setTunnelNetworkSettingsMs: settingsDurationMs
-                    ),
-                    stopOrigin: .launchFailure,
-                    lastKnownSystemStatus: .invalid
-                )
-                self.logStore.append("Tunnel start failed: \(error.localizedDescription)")
-                completionHandler(error)
+                do {
+                    let result = try self.startFreshLocalRuntime(
+                        for: providerConfiguration,
+                        runtimeStage: .startup,
+                        basePerformance: TunnelPerformanceTimings(
+                            setTunnelNetworkSettingsMs: settingsDurationMs
+                        )
+                    )
+                    let startedAt = Date()
+                    self.supervisorState.hasEverConnected = true
+                    self.supervisorState.lastHealthyAt = startedAt
+                    self.startHealthMonitorLocked()
+                    self.writeRuntimeState(
+                        for: providerConfiguration,
+                        phase: .connected,
+                        runtimeStage: .steadyState,
+                        startedAt: startedAt,
+                        lastError: nil,
+                        performance: result.performance,
+                        lastKnownSystemStatus: .connected,
+                        recoveryAttempt: 0,
+                        lastHealthyAt: startedAt
+                    )
+                    self.logStore.append(
+                        "Tunnel started with \(providerConfiguration.targetName) "
+                            + "[settings \(settingsDurationMs)ms, validate \(result.performance.configValidateMs ?? 0)ms, "
+                            + "engine \(result.performance.xrayEngineStartMs ?? 0)ms, tun2socks \(result.performance.tun2SocksStartMs ?? 0)ms]"
+                    )
+                    completionHandler(nil)
+                } catch let failure as LocalRuntimeStartFailure {
+                    self.writeRuntimeState(
+                        for: providerConfiguration,
+                        phase: .failed,
+                        runtimeStage: .startup,
+                        lastError: failure.message,
+                        performance: failure.performance,
+                        stopOrigin: .launchFailure,
+                        lastKnownSystemStatus: .invalid,
+                        lastRecoveryTrigger: failure.reason
+                    )
+                    self.logStore.append("Tunnel start failed: \(failure.message)")
+                    completionHandler(failure)
+                } catch {
+                    self.writeRuntimeState(
+                        for: providerConfiguration,
+                        phase: .failed,
+                        runtimeStage: .startup,
+                        lastError: error.localizedDescription,
+                        performance: TunnelPerformanceTimings(
+                            setTunnelNetworkSettingsMs: settingsDurationMs
+                        ),
+                        stopOrigin: .launchFailure,
+                        lastKnownSystemStatus: .invalid
+                    )
+                    self.logStore.append("Tunnel start failed: \(error.localizedDescription)")
+                    completionHandler(error)
+                }
             }
         }
     }
 
-    private func handleTun2SocksExit(
-        code: Int32,
-        providerConfiguration: TunnelProviderConfigurationEnvelope
-    ) {
-        let isStopping = stateQueue.sync { self.isStopping }
-        if isStopping {
-            logStore.append("tun2socks exited during tunnel shutdown with code \(code)")
+    private func startFreshLocalRuntime(
+        for providerConfiguration: TunnelProviderConfigurationEnvelope,
+        runtimeStage: TunnelRuntimeStage,
+        basePerformance: TunnelPerformanceTimings = TunnelPerformanceTimings()
+    ) throws -> LocalRuntimeStartResult {
+        stopCurrentRuntimeLocked()
+
+        let bridge = XrayEngineBridge()
+        let tun2Socks = Tun2SocksBridge()
+        let generation = LocalRuntimeGeneration(
+            id: UUID(),
+            bridge: bridge,
+            tun2Socks: tun2Socks
+        )
+
+        var performance = basePerformance
+
+        let validateStartedAt = DispatchTime.now()
+        do {
+            try bridge.validate(configJSON: providerConfiguration.runtimeConfigJSON)
+        } catch {
+            performance.configValidateMs = Self.elapsedMilliseconds(since: validateStartedAt)
+            throw LocalRuntimeStartFailure(
+                reason: .xrayStartFailed,
+                message: error.localizedDescription,
+                performance: performance
+            )
+        }
+        performance.configValidateMs = Self.elapsedMilliseconds(since: validateStartedAt)
+
+        let engineStartedAt = DispatchTime.now()
+        do {
+            try bridge.start(
+                configJSON: providerConfiguration.runtimeConfigJSON,
+                tunFD: -1,
+                assetDir: Bundle.main.resourceURL?.path ?? ""
+            )
+        } catch {
+            performance.xrayEngineStartMs = Self.elapsedMilliseconds(since: engineStartedAt)
+            throw LocalRuntimeStartFailure(
+                reason: .xrayStartFailed,
+                message: error.localizedDescription,
+                performance: performance
+            )
+        }
+        performance.xrayEngineStartMs = Self.elapsedMilliseconds(since: engineStartedAt)
+
+        let socksReady = Socks5ReadinessProbe.waitUntilReady(
+            host: AppConfiguration.localSocksListenAddress,
+            port: AppConfiguration.localSocksListenPort,
+            timeout: recoveryPolicy.socksReadinessTimeout,
+            retryInterval: recoveryPolicy.socksReadinessRetryInterval
+        )
+        guard socksReady else {
+            bridge.stop()
+            throw LocalRuntimeStartFailure(
+                reason: .socksNotReady,
+                message: TunnelLocalFailureReason.socksNotReady.displayName,
+                performance: performance
+            )
+        }
+
+        let tun2SocksStartedAt = DispatchTime.now()
+        tun2Socks.start(
+            configuration: Tun2SocksConfiguration(
+                socksAddress: AppConfiguration.localSocksListenAddress,
+                socksPort: AppConfiguration.localSocksListenPort,
+                mtu: AppConfiguration.defaultTunnelMTU
+            )
+        ) { [weak self] code in
+            self?.handleTun2SocksExit(code: code, generationID: generation.id)
+        }
+        performance.tun2SocksStartMs = Self.elapsedMilliseconds(since: tun2SocksStartedAt)
+
+        supervisorState.currentGeneration = generation
+        supervisorState.activeConfiguration = providerConfiguration
+        if runtimeStage == .recovery {
+            supervisorState.isRecovering = true
+        }
+
+        return LocalRuntimeStartResult(
+            generation: generation,
+            performance: performance
+        )
+    }
+
+    private func handleTun2SocksExit(code: Int32, generationID: UUID) {
+        stateQueue.async {
+            guard !self.supervisorState.isStopping else {
+                self.logStore.append("tun2socks exited during tunnel shutdown with code \(code)")
+                return
+            }
+            guard self.supervisorState.currentGeneration?.id == generationID else {
+                return
+            }
+
+            let message = code == 0
+                ? "tun2socks exited unexpectedly."
+                : "tun2socks exited with code \(code)."
+            self.beginRecovery(
+                trigger: .tun2SocksExited,
+                message: message
+            )
+        }
+    }
+
+    private func beginRecovery(trigger: TunnelLocalFailureReason, message: String) {
+        guard !supervisorState.isStopping else {
+            return
+        }
+        guard let providerConfiguration = supervisorState.activeConfiguration else {
+            failAndTearDown(
+                reason: .recoveryBudgetExceeded,
+                message: message
+            )
+            return
+        }
+        guard !supervisorState.isRecovering else {
             return
         }
 
-        let message = code == 0
-            ? "tun2socks exited unexpectedly."
-            : "tun2socks exited with code \(code)."
+        supervisorState.isRecovering = true
+        supervisorState.recoveryAttempt = 0
+        stopHealthMonitorLocked()
+        stopCurrentRuntimeLocked()
+
+        writeRuntimeState(
+            for: providerConfiguration,
+            phase: .recovering,
+            runtimeStage: .recovery,
+            lastError: message,
+            stopOrigin: .provider,
+            lastKnownSystemStatus: .connected,
+            recoveryAttempt: 0,
+            lastRecoveryTrigger: trigger,
+            lastHealthyAt: supervisorState.lastHealthyAt
+        )
+        logStore.append("Starting local runtime recovery for \(providerConfiguration.targetName): \(message)")
+        scheduleNextRecoveryAttemptLocked(for: providerConfiguration, lastTrigger: trigger)
+    }
+
+    private func scheduleNextRecoveryAttemptLocked(
+        for providerConfiguration: TunnelProviderConfigurationEnvelope,
+        lastTrigger: TunnelLocalFailureReason
+    ) {
+        let attempt = supervisorState.recoveryAttempt + 1
+        guard let backoff = recoveryPolicy.backoff(forAttempt: attempt) else {
+            failAndTearDown(
+                reason: .recoveryBudgetExceeded,
+                message: "Local runtime recovery failed after \(supervisorState.recoveryAttempt) attempts."
+            )
+            return
+        }
+
+        supervisorState.recoveryAttempt = attempt
+        writeRuntimeState(
+            for: providerConfiguration,
+            phase: .recovering,
+            runtimeStage: .recovery,
+            lastError: "Recovering local runtime (attempt \(attempt)/\(recoveryPolicy.maxRecoveryAttempts)).",
+            stopOrigin: .provider,
+            lastKnownSystemStatus: .connected,
+            recoveryAttempt: attempt,
+            lastRecoveryTrigger: lastTrigger,
+            lastHealthyAt: supervisorState.lastHealthyAt
+        )
+
+        stateQueue.asyncAfter(deadline: .now() + backoff) { [weak self] in
+            self?.performRecoveryAttempt(
+                for: providerConfiguration,
+                attempt: attempt,
+                trigger: lastTrigger
+            )
+        }
+    }
+
+    private func performRecoveryAttempt(
+        for providerConfiguration: TunnelProviderConfigurationEnvelope,
+        attempt: Int,
+        trigger: TunnelLocalFailureReason
+    ) {
+        guard !supervisorState.isStopping else {
+            return
+        }
+        guard supervisorState.isRecovering else {
+            return
+        }
+        guard supervisorState.activeConfiguration?.sessionID == providerConfiguration.sessionID else {
+            return
+        }
+
+        do {
+            let result = try startFreshLocalRuntime(
+                for: providerConfiguration,
+                runtimeStage: .recovery
+            )
+            let now = Date()
+            supervisorState.isRecovering = false
+            supervisorState.recoveryAttempt = 0
+            supervisorState.hasEverConnected = true
+            supervisorState.lastHealthyAt = now
+            startHealthMonitorLocked()
+            writeRuntimeState(
+                for: providerConfiguration,
+                phase: .connected,
+                runtimeStage: .steadyState,
+                lastError: nil,
+                performance: result.performance,
+                lastKnownSystemStatus: .connected,
+                recoveryAttempt: 0,
+                lastRecoveryTrigger: trigger,
+                lastHealthyAt: now
+            )
+            logStore.append("Recovered local runtime for \(providerConfiguration.targetName) on attempt \(attempt).")
+        } catch let failure as LocalRuntimeStartFailure {
+            logStore.append("Recovery attempt \(attempt) failed: \(failure.message)")
+            writeRuntimeState(
+                for: providerConfiguration,
+                phase: .recovering,
+                runtimeStage: .recovery,
+                lastError: failure.message,
+                performance: failure.performance,
+                stopOrigin: .provider,
+                lastKnownSystemStatus: .connected,
+                recoveryAttempt: attempt,
+                lastRecoveryTrigger: failure.reason,
+                lastHealthyAt: supervisorState.lastHealthyAt
+            )
+            scheduleNextRecoveryAttemptLocked(for: providerConfiguration, lastTrigger: failure.reason)
+        } catch {
+            failAndTearDown(
+                reason: .recoveryBudgetExceeded,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func performHealthCheck() {
+        stateQueue.async {
+            guard !self.supervisorState.isStopping else {
+                return
+            }
+            guard !self.supervisorState.isRecovering else {
+                return
+            }
+            guard !self.supervisorState.healthCheckInFlight else {
+                return
+            }
+            guard let providerConfiguration = self.supervisorState.activeConfiguration,
+                  let generation = self.supervisorState.currentGeneration
+            else {
+                return
+            }
+
+            self.supervisorState.healthCheckInFlight = true
+            self.healthQueue.async { [weak self] in
+                guard let self else {
+                    return
+                }
+                let engineRunning = generation.bridge.isRunning
+
+                self.stateQueue.async {
+                    self.supervisorState.healthCheckInFlight = false
+                    guard !self.supervisorState.isStopping else {
+                        return
+                    }
+                    guard self.supervisorState.currentGeneration?.id == generation.id else {
+                        return
+                    }
+
+                    if engineRunning {
+                        let now = Date()
+                        self.supervisorState.lastHealthyAt = now
+                        self.writeRuntimeState(
+                            for: providerConfiguration,
+                            phase: .connected,
+                            runtimeStage: .steadyState,
+                            lastError: nil,
+                            lastKnownSystemStatus: .connected,
+                            recoveryAttempt: 0,
+                            lastHealthyAt: now
+                        )
+                        return
+                    }
+
+                    self.beginRecovery(
+                        trigger: .xrayRuntimeStopped,
+                        message: TunnelLocalFailureReason.xrayRuntimeStopped.displayName
+                    )
+                }
+            }
+        }
+    }
+
+    private func failAndTearDown(reason: TunnelLocalFailureReason, message: String) {
+        guard let providerConfiguration = supervisorState.activeConfiguration else {
+            cancelTunnelWithError(
+                NSError(
+                    domain: "internet",
+                    code: 503,
+                    userInfo: [NSLocalizedDescriptionKey: message]
+                )
+            )
+            return
+        }
+
+        supervisorState.isRecovering = false
+        stopHealthMonitorLocked()
+        stopCurrentRuntimeLocked()
         writeRuntimeState(
             for: providerConfiguration,
             phase: .failed,
+            runtimeStage: .recovery,
             lastError: message,
             stopOrigin: .provider,
-            lastKnownSystemStatus: .disconnecting
+            lastKnownSystemStatus: .disconnecting,
+            recoveryAttempt: supervisorState.recoveryAttempt,
+            lastRecoveryTrigger: reason,
+            lastHealthyAt: supervisorState.lastHealthyAt
         )
-        logStore.append(message)
+        logStore.append("Tearing down tunnel after recovery failure: \(message)")
         cancelTunnelWithError(
             NSError(
                 domain: "internet",
-                code: 502,
+                code: 503,
                 userInfo: [NSLocalizedDescriptionKey: message]
             )
         )
+    }
+
+    private func startHealthMonitorLocked() {
+        stopHealthMonitorLocked()
+
+        let timer = DispatchSource.makeTimerSource(queue: stateQueue)
+        timer.schedule(
+            deadline: .now() + recoveryPolicy.healthCheckInterval,
+            repeating: recoveryPolicy.healthCheckInterval
+        )
+        timer.setEventHandler { [weak self] in
+            self?.performHealthCheck()
+        }
+        supervisorState.healthTimer = timer
+        timer.resume()
+    }
+
+    private func stopHealthMonitorLocked() {
+        supervisorState.healthTimer?.cancel()
+        supervisorState.healthTimer = nil
+        supervisorState.healthCheckInFlight = false
+    }
+
+    private func stopCurrentRuntimeLocked() {
+        let generation = supervisorState.currentGeneration
+        supervisorState.currentGeneration = nil
+        generation?.tun2Socks.stop()
+        generation?.bridge.stop()
+    }
+
+    private func startPathMonitorIfNeeded() {
+        guard pathMonitor == nil else {
+            return
+        }
+
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let status: String
+            switch path.status {
+            case .satisfied:
+                status = "satisfied"
+            case .requiresConnection:
+                status = "requires-connection"
+            case .unsatisfied:
+                status = "unsatisfied"
+            @unknown default:
+                status = "unknown"
+            }
+            let interfaces = path.availableInterfaces.map(\.debugDescription).joined(separator: ",")
+            self?.logStore.append("Network path update: \(status) [\(interfaces)]")
+        }
+        monitor.start(queue: pathMonitorQueue)
+        pathMonitor = monitor
+    }
+
+    private func stopPathMonitor() {
+        pathMonitor?.cancel()
+        pathMonitor = nil
     }
 
     private func makeTunnelSettings(routePolicy: TunnelRoutePolicy) -> NEPacketTunnelNetworkSettings {
@@ -271,25 +675,35 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func writeRuntimeState(
         for providerConfiguration: TunnelProviderConfigurationEnvelope,
         phase: TunnelRuntimePhase,
+        runtimeStage: TunnelRuntimeStage? = nil,
         startedAt: Date? = nil,
         lastError: String? = nil,
         performance: TunnelPerformanceTimings? = nil,
         stopOrigin: TunnelStopOrigin? = nil,
-        lastKnownSystemStatus: TunnelSystemStatus
+        lastKnownSystemStatus: TunnelSystemStatus,
+        recoveryAttempt: Int? = nil,
+        lastRecoveryTrigger: TunnelLocalFailureReason? = nil,
+        lastHealthyAt: Date? = nil
     ) {
         do {
             try tunnelSessionStore.updateRuntimeState { state in
-                guard state.sessionID == providerConfiguration.sessionID else {
+                guard state.sessionID == nil || state.sessionID == providerConfiguration.sessionID else {
                     return
                 }
+                state.sessionID = providerConfiguration.sessionID
                 state.activeTunnelTarget = providerConfiguration.activeTunnelTarget
                 state.targetName = providerConfiguration.targetName
                 state.phase = phase
+                state.runtimeStage = runtimeStage ?? state.runtimeStage
                 state.startedAt = startedAt ?? state.startedAt
                 state.lastError = lastError
                 state.configHash = providerConfiguration.configHash
+                state.stopReason = nil
                 state.stopOrigin = stopOrigin
                 state.lastKnownSystemStatus = lastKnownSystemStatus
+                state.recoveryAttempt = recoveryAttempt ?? state.recoveryAttempt
+                state.lastRecoveryTrigger = lastRecoveryTrigger ?? state.lastRecoveryTrigger
+                state.lastHealthyAt = lastHealthyAt ?? state.lastHealthyAt
                 if let performance {
                     var merged = state.performance ?? TunnelPerformanceTimings()
                     merged.merge(from: performance)
@@ -303,12 +717,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     activeTunnelTarget: providerConfiguration.activeTunnelTarget,
                     targetName: providerConfiguration.targetName,
                     phase: phase,
+                    runtimeStage: runtimeStage,
                     startedAt: startedAt,
                     lastError: lastError,
                     configHash: providerConfiguration.configHash,
                     performance: performance,
                     stopOrigin: stopOrigin,
-                    lastKnownSystemStatus: lastKnownSystemStatus
+                    lastKnownSystemStatus: lastKnownSystemStatus,
+                    recoveryAttempt: recoveryAttempt,
+                    lastRecoveryTrigger: lastRecoveryTrigger,
+                    lastHealthyAt: lastHealthyAt
                 )
             )
         }

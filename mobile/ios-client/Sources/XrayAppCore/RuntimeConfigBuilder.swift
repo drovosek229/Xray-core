@@ -133,6 +133,7 @@ public enum RuntimeConfigBuilder {
             ? "/"
             : xhttpPath.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedAdvancedXHTTPSettings = xhttpAdvancedSettings?.normalized
+        let normalizedXmuxSettings = effectiveXmuxSettings(from: normalizedAdvancedXHTTPSettings)
 
         let root = RuntimeConfig(
             log: context.logFilePath.map { RuntimeLog(logLevel: "warning", error: $0) },
@@ -211,7 +212,8 @@ public enum RuntimeConfigBuilder {
                             xPaddingObfsMode: normalizedAdvancedXHTTPSettings?.xPaddingObfsMode,
                             noGRPCHeader: normalizedAdvancedXHTTPSettings?.noGRPCHeader,
                             noSSEHeader: normalizedAdvancedXHTTPSettings?.noSSEHeader,
-                            scMaxEachPostBytes: normalizedAdvancedXHTTPSettings?.scMaxEachPostBytes
+                            scMaxEachPostBytes: normalizedAdvancedXHTTPSettings?.scMaxEachPostBytes,
+                            xmux: normalizedXmuxSettings.map(RuntimeXmuxSettings.init)
                         )
                     )
                 ),
@@ -256,6 +258,17 @@ public enum RuntimeConfigBuilder {
     private static func normalizeHTTPMethod(_ value: String) -> String {
         let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         return normalized.isEmpty ? ManualUplinkHTTPMethod.post.rawValue : normalized
+    }
+
+    private static func effectiveXmuxSettings(from advancedSettings: XHTTPAdvancedSettings?) -> XHTTPXmuxSettings? {
+        if let explicitXmux = advancedSettings?.xmux?.normalized {
+            return explicitXmux
+        }
+
+        return XHTTPXmuxSettings(
+            hKeepAlivePeriod: 30,
+            warmConnections: 1
+        )
     }
 
     private static func normalizeFlow(_ value: String?) throws -> String? {
@@ -492,6 +505,28 @@ private struct RuntimeXHTTPSettings: Encodable {
     let noGRPCHeader: Bool?
     let noSSEHeader: Bool?
     let scMaxEachPostBytes: String?
+    let xmux: RuntimeXmuxSettings?
+}
+
+private struct RuntimeXmuxSettings: Encodable {
+    let maxConcurrency: String?
+    let maxConnections: String?
+    let cMaxReuseTimes: String?
+    let hMaxRequestTimes: String?
+    let hMaxReusableSecs: String?
+    let hKeepAlivePeriod: Int?
+    let warmConnections: Int?
+
+    init(_ settings: XHTTPXmuxSettings) {
+        let normalized = settings.normalized
+        self.maxConcurrency = normalized?.maxConcurrency
+        self.maxConnections = normalized?.maxConnections
+        self.cMaxReuseTimes = normalized?.cMaxReuseTimes
+        self.hMaxRequestTimes = normalized?.hMaxRequestTimes
+        self.hMaxReusableSecs = normalized?.hMaxReusableSecs
+        self.hKeepAlivePeriod = normalized?.hKeepAlivePeriod
+        self.warmConnections = normalized?.warmConnections
+    }
 }
 
 private struct RuntimeRouting: Encodable {

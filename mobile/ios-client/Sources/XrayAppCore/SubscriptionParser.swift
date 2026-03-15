@@ -404,7 +404,8 @@ public enum SubscriptionParser {
             xPaddingObfsMode: parseBool(queryValue("xPaddingObfsMode", in: queryItems)) ?? extra?.xPaddingObfsMode,
             noGRPCHeader: parseBool(queryValue("noGRPCHeader", in: queryItems)) ?? extra?.noGRPCHeader,
             noSSEHeader: parseBool(queryValue("noSSEHeader", in: queryItems)) ?? extra?.noSSEHeader,
-            scMaxEachPostBytes: queryValue("scMaxEachPostBytes", in: queryItems) ?? extra?.scMaxEachPostBytes?.value
+            scMaxEachPostBytes: queryValue("scMaxEachPostBytes", in: queryItems) ?? extra?.scMaxEachPostBytes?.value,
+            xmux: extra?.xmux?.settings
         ).normalized
     }
 
@@ -668,6 +669,7 @@ private struct ImportedLinkExtra: Decodable {
     let noGRPCHeader: Bool?
     let noSSEHeader: Bool?
     let scMaxEachPostBytes: FlexibleString?
+    let xmux: ImportedXmuxSettings?
 
     private enum CodingKeys: String, CodingKey {
         case displayName = "ps"
@@ -701,6 +703,7 @@ private struct ImportedLinkExtra: Decodable {
         case noGRPCHeader
         case noSSEHeader
         case scMaxEachPostBytes
+        case xmux
     }
 }
 
@@ -799,6 +802,7 @@ private struct ImportedXHTTPSettings: Decodable {
     let noGRPCHeader: Bool?
     let noSSEHeader: Bool?
     let scMaxEachPostBytes: FlexibleString?
+    let xmux: ImportedXmuxSettings?
 
     var advancedSettings: XHTTPAdvancedSettings? {
         XHTTPAdvancedSettings(
@@ -813,7 +817,30 @@ private struct ImportedXHTTPSettings: Decodable {
             xPaddingObfsMode: xPaddingObfsMode,
             noGRPCHeader: noGRPCHeader,
             noSSEHeader: noSSEHeader,
-            scMaxEachPostBytes: scMaxEachPostBytes?.value
+            scMaxEachPostBytes: scMaxEachPostBytes?.value,
+            xmux: xmux?.settings
+        ).normalized
+    }
+}
+
+private struct ImportedXmuxSettings: Decodable {
+    let maxConcurrency: FlexibleString?
+    let maxConnections: FlexibleString?
+    let cMaxReuseTimes: FlexibleString?
+    let hMaxRequestTimes: FlexibleString?
+    let hMaxReusableSecs: FlexibleString?
+    let hKeepAlivePeriod: Int?
+    let warmConnections: Int?
+
+    var settings: XHTTPXmuxSettings? {
+        XHTTPXmuxSettings(
+            maxConcurrency: maxConcurrency?.value,
+            maxConnections: maxConnections?.value,
+            cMaxReuseTimes: cMaxReuseTimes?.value,
+            hMaxRequestTimes: hMaxRequestTimes?.value,
+            hMaxReusableSecs: hMaxReusableSecs?.value,
+            hKeepAlivePeriod: hKeepAlivePeriod,
+            warmConnections: warmConnections
         ).normalized
     }
 }

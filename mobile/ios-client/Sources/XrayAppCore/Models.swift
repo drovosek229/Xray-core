@@ -252,6 +252,57 @@ public struct TLSSecuritySettings: Codable, Hashable, Sendable {
     }
 }
 
+public struct XHTTPXmuxSettings: Codable, Hashable, Sendable {
+    public var maxConcurrency: String?
+    public var maxConnections: String?
+    public var cMaxReuseTimes: String?
+    public var hMaxRequestTimes: String?
+    public var hMaxReusableSecs: String?
+    public var hKeepAlivePeriod: Int?
+    public var warmConnections: Int?
+
+    public init(
+        maxConcurrency: String? = nil,
+        maxConnections: String? = nil,
+        cMaxReuseTimes: String? = nil,
+        hMaxRequestTimes: String? = nil,
+        hMaxReusableSecs: String? = nil,
+        hKeepAlivePeriod: Int? = nil,
+        warmConnections: Int? = nil
+    ) {
+        self.maxConcurrency = maxConcurrency
+        self.maxConnections = maxConnections
+        self.cMaxReuseTimes = cMaxReuseTimes
+        self.hMaxRequestTimes = hMaxRequestTimes
+        self.hMaxReusableSecs = hMaxReusableSecs
+        self.hKeepAlivePeriod = hKeepAlivePeriod
+        self.warmConnections = warmConnections
+    }
+
+    public var isEmpty: Bool {
+        maxConcurrency == nil &&
+            maxConnections == nil &&
+            cMaxReuseTimes == nil &&
+            hMaxRequestTimes == nil &&
+            hMaxReusableSecs == nil &&
+            hKeepAlivePeriod == nil &&
+            warmConnections == nil
+    }
+
+    public var normalized: XHTTPXmuxSettings? {
+        let normalized = XHTTPXmuxSettings(
+            maxConcurrency: emptyToNil(maxConcurrency),
+            maxConnections: emptyToNil(maxConnections),
+            cMaxReuseTimes: emptyToNil(cMaxReuseTimes),
+            hMaxRequestTimes: emptyToNil(hMaxRequestTimes),
+            hMaxReusableSecs: emptyToNil(hMaxReusableSecs),
+            hKeepAlivePeriod: (hKeepAlivePeriod ?? 0) > 0 ? hKeepAlivePeriod : nil,
+            warmConnections: (warmConnections ?? 0) > 0 ? warmConnections : nil
+        )
+        return normalized.isEmpty ? nil : normalized
+    }
+}
+
 public struct XHTTPAdvancedSettings: Codable, Hashable, Sendable {
     public var sessionPlacement: String?
     public var sessionKey: String?
@@ -265,6 +316,7 @@ public struct XHTTPAdvancedSettings: Codable, Hashable, Sendable {
     public var noGRPCHeader: Bool?
     public var noSSEHeader: Bool?
     public var scMaxEachPostBytes: String?
+    public var xmux: XHTTPXmuxSettings?
 
     public init(
         sessionPlacement: String? = nil,
@@ -278,7 +330,8 @@ public struct XHTTPAdvancedSettings: Codable, Hashable, Sendable {
         xPaddingObfsMode: Bool? = nil,
         noGRPCHeader: Bool? = nil,
         noSSEHeader: Bool? = nil,
-        scMaxEachPostBytes: String? = nil
+        scMaxEachPostBytes: String? = nil,
+        xmux: XHTTPXmuxSettings? = nil
     ) {
         self.sessionPlacement = sessionPlacement
         self.sessionKey = sessionKey
@@ -292,6 +345,7 @@ public struct XHTTPAdvancedSettings: Codable, Hashable, Sendable {
         self.noGRPCHeader = noGRPCHeader
         self.noSSEHeader = noSSEHeader
         self.scMaxEachPostBytes = scMaxEachPostBytes
+        self.xmux = xmux
     }
 
     public var isEmpty: Bool {
@@ -306,7 +360,8 @@ public struct XHTTPAdvancedSettings: Codable, Hashable, Sendable {
             xPaddingObfsMode == nil &&
             noGRPCHeader == nil &&
             noSSEHeader == nil &&
-            scMaxEachPostBytes == nil
+            scMaxEachPostBytes == nil &&
+            xmux?.normalized == nil
     }
 
     public var normalized: XHTTPAdvancedSettings? {
@@ -322,7 +377,8 @@ public struct XHTTPAdvancedSettings: Codable, Hashable, Sendable {
             xPaddingObfsMode: xPaddingObfsMode,
             noGRPCHeader: noGRPCHeader,
             noSSEHeader: noSSEHeader,
-            scMaxEachPostBytes: emptyToNil(scMaxEachPostBytes)
+            scMaxEachPostBytes: emptyToNil(scMaxEachPostBytes),
+            xmux: xmux?.normalized
         )
         return value.isEmpty ? nil : value
     }
@@ -360,6 +416,14 @@ private func advancedXHTTPSignature(_ settings: XHTTPAdvancedSettings?) -> Strin
     parts.append(settings.noGRPCHeader.map(String.init) ?? "")
     parts.append(settings.noSSEHeader.map(String.init) ?? "")
     parts.append(settings.scMaxEachPostBytes ?? "")
+    let xmux = settings.xmux?.normalized
+    parts.append(xmux?.maxConcurrency ?? "")
+    parts.append(xmux?.maxConnections ?? "")
+    parts.append(xmux?.cMaxReuseTimes ?? "")
+    parts.append(xmux?.hMaxRequestTimes ?? "")
+    parts.append(xmux?.hMaxReusableSecs ?? "")
+    parts.append(xmux?.hKeepAlivePeriod.map(String.init) ?? "")
+    parts.append(xmux?.warmConnections.map(String.init) ?? "")
     return parts.joined(separator: "|")
 }
 
