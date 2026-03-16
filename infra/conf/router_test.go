@@ -2,7 +2,6 @@ package conf_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,35 +9,11 @@ import (
 	_ "unsafe"
 
 	"github.com/xtls/xray-core/app/router"
-	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/platform"
-	"github.com/xtls/xray-core/common/platform/filesystem"
 	"github.com/xtls/xray-core/common/serial"
 	. "github.com/xtls/xray-core/infra/conf"
 	"google.golang.org/protobuf/proto"
 )
-
-func getAssetPath(file string) (string, error) {
-	path := platform.GetAssetLocation(file)
-	_, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		path := filepath.Join("..", "..", "resources", file)
-		_, err := os.Stat(path)
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("can't find %s in standard asset locations or {project_root}/resources", file)
-		}
-		if err != nil {
-			return "", fmt.Errorf("can't stat %s: %v", path, err)
-		}
-		return path, nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("can't stat %s: %v", path, err)
-	}
-
-	return path, nil
-}
 
 func TestToCidrList(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "test-")
@@ -47,13 +22,46 @@ func TestToCidrList(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	geoipPath, err := getAssetPath("geoip.dat")
+	geoipData, err := proto.Marshal(&router.GeoIPList{
+		Entry: []*router.GeoIP{
+			{
+				CountryCode: "US",
+				Cidr: []*router.CIDR{
+					{
+						Ip:     []byte{1, 1, 1, 0},
+						Prefix: 24,
+					},
+				},
+			},
+			{
+				CountryCode: "CN",
+				Cidr: []*router.CIDR{
+					{
+						Ip:     []byte{8, 8, 8, 0},
+						Prefix: 24,
+					},
+				},
+			},
+			{
+				CountryCode: "CA",
+				Cidr: []*router.CIDR{
+					{
+						Ip:     []byte{9, 9, 9, 0},
+						Prefix: 24,
+					},
+				},
+			},
+		},
+	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("can't marshal geoip test data: %v", err)
 	}
-
-	common.Must(filesystem.CopyFile(filepath.Join(tempDir, "geoip.dat"), geoipPath))
-	common.Must(filesystem.CopyFile(filepath.Join(tempDir, "geoiptestrouter.dat"), geoipPath))
+	if err := os.WriteFile(filepath.Join(tempDir, "geoip.dat"), geoipData, 0o600); err != nil {
+		t.Fatalf("can't write geoip test data: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "geoiptestrouter.dat"), geoipData, 0o600); err != nil {
+		t.Fatalf("can't write external geoip test data: %v", err)
+	}
 
 	os.Setenv("xray.location.asset", tempDir)
 	defer os.Unsetenv("xray.location.asset")

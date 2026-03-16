@@ -96,6 +96,10 @@ func toDomainMatchingType(t router.Domain_Type) dns.DomainMatchingType {
 }
 
 func (c *NameServerConfig) Build() (*dns.NameServer, error) {
+	return c.buildWithAssetResolver(nil)
+}
+
+func (c *NameServerConfig) buildWithAssetResolver(resolver geoAssetPathProvider) (*dns.NameServer, error) {
 	if c.Address == nil {
 		return nil, errors.New("NameServer address is not specified.")
 	}
@@ -104,7 +108,7 @@ func (c *NameServerConfig) Build() (*dns.NameServer, error) {
 	var originalRules []*dns.NameServer_OriginalRule
 
 	for _, rule := range c.Domains {
-		parsedDomain, err := parseDomainRule(rule)
+		parsedDomain, err := parseDomainRuleWithAssetResolver(rule, resolver)
 		if err != nil {
 			return nil, errors.New("invalid domain rule: ", rule).Base(err)
 		}
@@ -145,12 +149,12 @@ func (c *NameServerConfig) Build() (*dns.NameServer, error) {
 		}
 	}
 
-	expectedGeoipList, err := ToCidrList(newExpectedIPs)
+	expectedGeoipList, err := ToCidrListWithAssetResolver(newExpectedIPs, resolver)
 	if err != nil {
 		return nil, errors.New("invalid expected IP rule: ", c.ExpectedIPs).Base(err)
 	}
 
-	unexpectedGeoipList, err := ToCidrList(newUnexpectedIPs)
+	unexpectedGeoipList, err := ToCidrListWithAssetResolver(newUnexpectedIPs, resolver)
 	if err != nil {
 		return nil, errors.New("invalid unexpected IP rule: ", c.UnexpectedIPs).Base(err)
 	}
@@ -290,6 +294,10 @@ func (m *HostsWrapper) UnmarshalJSON(data []byte) error {
 
 // Build implements Buildable
 func (m *HostsWrapper) Build() ([]*dns.Config_HostMapping, error) {
+	return m.buildWithAssetResolver(nil)
+}
+
+func (m *HostsWrapper) buildWithAssetResolver(resolver geoAssetPathProvider) ([]*dns.Config_HostMapping, error) {
 	mappings := make([]*dns.Config_HostMapping, 0, 20)
 
 	domains := make([]string, 0, len(m.Hosts))
@@ -315,7 +323,7 @@ func (m *HostsWrapper) Build() ([]*dns.Config_HostMapping, error) {
 			if len(listName) == 0 {
 				return nil, errors.New("empty geosite rule: ", domain)
 			}
-			geositeList, err := loadGeositeWithAttr("geosite.dat", listName)
+			geositeList, err := loadGeositeWithAttrWithAssetResolver("geosite.dat", listName, resolver)
 			if err != nil {
 				return nil, errors.New("failed to load geosite: ", listName).Base(err)
 			}
@@ -376,7 +384,7 @@ func (m *HostsWrapper) Build() ([]*dns.Config_HostMapping, error) {
 			}
 			filename := kv[0]
 			list := kv[1]
-			geositeList, err := loadGeositeWithAttr(filename, list)
+			geositeList, err := loadGeositeWithAttrWithAssetResolver(filename, list, nil)
 			if err != nil {
 				return nil, errors.New("failed to load domain list: ", list, " from ", filename).Base(err)
 			}
@@ -399,6 +407,10 @@ func (m *HostsWrapper) Build() ([]*dns.Config_HostMapping, error) {
 
 // Build implements Buildable
 func (c *DNSConfig) Build() (*dns.Config, error) {
+	return c.buildWithAssetResolver(nil)
+}
+
+func (c *DNSConfig) buildWithAssetResolver(resolver geoAssetPathProvider) (*dns.Config, error) {
 	config := &dns.Config{
 		Tag:                    c.Tag,
 		DisableCache:           c.DisableCache,
@@ -484,7 +496,7 @@ func (c *DNSConfig) Build() (*dns.Config, error) {
 	}
 
 	for _, server := range c.Servers {
-		ns, err := server.Build()
+		ns, err := server.buildWithAssetResolver(resolver)
 		if err != nil {
 			return nil, errors.New("failed to build nameserver").Base(err)
 		}
@@ -493,7 +505,7 @@ func (c *DNSConfig) Build() (*dns.Config, error) {
 	}
 
 	if c.Hosts != nil {
-		staticHosts, err := c.Hosts.Build()
+		staticHosts, err := c.Hosts.buildWithAssetResolver(resolver)
 		if err != nil {
 			return nil, errors.New("failed to build hosts").Base(err)
 		}
