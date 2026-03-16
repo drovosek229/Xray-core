@@ -213,6 +213,73 @@ func (m *XmuxManager) removeXmuxClientLocked(index int) {
 }
 
 func (m *XmuxManager) pickAvailableClientLocked(ctx context.Context, now time.Time) *XmuxClient {
+	if now.IsZero() && (m.xmuxConfig.HMaxRequestTimes == nil || m.xmuxConfig.HMaxRequestTimes.To <= 0) {
+		return m.pickAvailableClientWithoutDeadlineLocked(ctx)
+	}
+	return m.pickAvailableClientWithDeadlineLocked(ctx, now)
+}
+
+func (m *XmuxManager) pickAvailableClientWithoutDeadlineLocked(ctx context.Context) *XmuxClient {
+	clientCount := len(m.xmuxClients)
+	if clientCount == 0 {
+		m.nextClientIndex = 0
+		m.usableCount = 0
+		return nil
+	}
+
+	start := m.nextClientIndex
+	if start >= clientCount {
+		start = 0
+	}
+
+	for scanned := 0; scanned < clientCount && clientCount > 0; {
+		if start >= clientCount {
+			start = 0
+		}
+		xmuxClient := m.xmuxClients[start]
+		openUsage := xmuxClient.OpenUsage.Load()
+		scanned += 1
+		if m.concurrency > 0 && openUsage >= m.concurrency {
+			start += 1
+			continue
+		}
+		if xmuxClient.XmuxConn.IsClosed() || xmuxClient.leftUsage == 0 {
+			errors.LogDebug(ctx, "XMUX: removing xmuxClient, IsClosed() = ", xmuxClient.XmuxConn.IsClosed(),
+				", OpenUsage = ", openUsage,
+				", leftUsage = ", xmuxClient.leftUsage,
+				", LeftRequests = ", xmuxClient.LeftRequests.Load(),
+				", UnreusableAt = ", xmuxClient.UnreusableAt)
+			m.removeXmuxClientLocked(start)
+			clientCount -= 1
+			scanned -= 1
+			if clientCount == 0 {
+				m.nextClientIndex = 0
+				m.usableCount = 0
+				return nil
+			}
+			if start < m.nextClientIndex && m.nextClientIndex > 0 {
+				m.nextClientIndex -= 1
+			}
+			continue
+		}
+
+		m.nextClientIndex = start + 1
+		if m.nextClientIndex >= clientCount {
+			m.nextClientIndex = 0
+		}
+		return xmuxClient
+	}
+
+	if m.nextClientIndex >= clientCount {
+		m.nextClientIndex = 0
+	}
+	if m.usableCount > clientCount {
+		m.usableCount = clientCount
+	}
+	return nil
+}
+
+func (m *XmuxManager) pickAvailableClientWithDeadlineLocked(ctx context.Context, now time.Time) *XmuxClient {
 	clientCount := len(m.xmuxClients)
 	if clientCount == 0 {
 		m.nextClientIndex = 0
