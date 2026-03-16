@@ -3,7 +3,6 @@ package splithttp
 import (
 	"context"
 	"math"
-	mathrand "math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,8 +30,8 @@ type XmuxManager struct {
 	warmConnections int32
 	newConnFunc     func() XmuxConn
 	xmuxClients     []*XmuxClient
+	nextClientIndex int
 	refillScheduled bool
-	rng             *mathrand.Rand
 }
 
 func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxManager {
@@ -43,7 +42,6 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 		warmConnections: xmuxConfig.GetNormalizedWarmConnections(),
 		newConnFunc:     newConnFunc,
 		xmuxClients:     make([]*XmuxClient, 0),
-		rng:             mathrand.New(mathrand.NewSource(time.Now().UnixNano())),
 	}
 	manager.access.Lock()
 	manager.fillWarmClientsLocked(context.Background())
@@ -110,9 +108,12 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 func (m *XmuxManager) sweepAndPickAvailableClientLocked(ctx context.Context) (*XmuxClient, int) {
 	now := time.Now()
 	kept := m.xmuxClients[:0]
+	cursor := m.nextClientIndex
 	var selected *XmuxClient
+	selectedIndex := -1
+	var wrapped *XmuxClient
+	wrappedIndex := -1
 	usableCount := 0
-	eligible := 0
 
 	for _, xmuxClient := range m.xmuxClients {
 		if !m.isUsableClientLocked(xmuxClient, now) {
@@ -124,20 +125,43 @@ func (m *XmuxManager) sweepAndPickAvailableClientLocked(ctx context.Context) (*X
 			continue
 		}
 
+		keptIndex := len(kept)
 		kept = append(kept, xmuxClient)
 		usableCount++
 
 		if m.concurrency > 0 && xmuxClient.OpenUsage.Load() >= m.concurrency {
 			continue
 		}
-		eligible++
-		if m.rng.Intn(eligible) == 0 {
-			selected = xmuxClient
+		if keptIndex >= cursor {
+			if selected == nil {
+				selected = xmuxClient
+				selectedIndex = keptIndex
+			}
+		} else if wrapped == nil {
+			wrapped = xmuxClient
+			wrappedIndex = keptIndex
 		}
 	}
 
 	clear(m.xmuxClients[len(kept):])
 	m.xmuxClients = kept
+
+	if selected == nil {
+		selected = wrapped
+		selectedIndex = wrappedIndex
+	}
+
+	if len(kept) == 0 {
+		m.nextClientIndex = 0
+	} else if selectedIndex >= 0 {
+		m.nextClientIndex = selectedIndex + 1
+		if m.nextClientIndex >= len(kept) {
+			m.nextClientIndex = 0
+		}
+	} else if m.nextClientIndex >= len(kept) {
+		m.nextClientIndex = 0
+	}
+
 	return selected, usableCount
 }
 
