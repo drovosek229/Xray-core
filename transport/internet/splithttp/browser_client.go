@@ -61,7 +61,7 @@ func (c *BrowserDialerClient) PostPacket(ctx context.Context, url string, sessio
 
 	var bytes []byte
 	if request.Body != nil {
-		bytes, err = io.ReadAll(request.Body)
+		bytes, err = readRequestBody(request.Body, request.ContentLength)
 		if err != nil {
 			return err
 		}

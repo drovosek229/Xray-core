@@ -65,9 +65,10 @@ func (c *Config) GetRequestHeaderWithPayload(payload []byte) http.Header {
 		return header
 	}
 	encodedData := base64.RawURLEncoding.EncodeToString(payload)
+	chunkSizeRange := c.GetNormalizedUplinkChunkSize()
 
 	for i := 0; len(encodedData) > 0; i++ {
-		chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
+		chunkSize := min(int(chunkSizeRange.rand()), len(encodedData))
 		chunk := encodedData[:chunkSize]
 		encodedData = encodedData[chunkSize:]
 		headerKey := key + "-" + strconv.Itoa(i)
@@ -85,9 +86,10 @@ func (c *Config) GetRequestCookiesWithPayload(payload []byte) []*http.Cookie {
 		return cookies
 	}
 	encodedData := base64.RawURLEncoding.EncodeToString(payload)
+	chunkSizeRange := c.GetNormalizedUplinkChunkSize()
 
 	for i := 0; len(encodedData) > 0; i++ {
-		chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
+		chunkSize := min(int(chunkSizeRange.rand()), len(encodedData))
 		chunk := encodedData[:chunkSize]
 		encodedData = encodedData[chunkSize:]
 		cookieName := key + "_" + strconv.Itoa(i)
@@ -112,6 +114,32 @@ func isCookieToken(name string) bool {
 		}
 	}
 	return true
+}
+
+func readRequestBody(body io.Reader, contentLength int64) ([]byte, error) {
+	if body == nil {
+		return nil, nil
+	}
+	if contentLength > 0 && contentLength <= int64(^uint(0)>>1) {
+		buf := make([]byte, int(contentLength))
+		n, err := io.ReadFull(body, buf)
+		switch err {
+		case nil:
+			remaining, err := io.ReadAll(body)
+			if err != nil {
+				return nil, err
+			}
+			if len(remaining) == 0 {
+				return buf, nil
+			}
+			return append(buf, remaining...), nil
+		case io.EOF, io.ErrUnexpectedEOF:
+			return buf[:n], nil
+		default:
+			return nil, err
+		}
+	}
+	return io.ReadAll(body)
 }
 
 func (c *Config) WriteResponseHeader(writer http.ResponseWriter, requestMethod string, requestHeader http.Header) {
@@ -408,7 +436,7 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 		var data []byte
 		var err error
 		if request.Body != nil {
-			data, err = io.ReadAll(request.Body)
+			data, err = readRequestBody(request.Body, request.ContentLength)
 			if err != nil {
 				return err
 			}
@@ -420,8 +448,9 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 			request.Header = c.GetRequestHeaderForBehavior(behavior)
 			if key := c.GetNormalizedUplinkDataKey(); key != "" {
 				encodedData := base64.RawURLEncoding.EncodeToString(data)
+				chunkSizeRange := c.GetNormalizedUplinkChunkSize()
 				for i := 0; len(encodedData) > 0; i++ {
-					chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
+					chunkSize := min(int(chunkSizeRange.rand()), len(encodedData))
 					chunk := encodedData[:chunkSize]
 					encodedData = encodedData[chunkSize:]
 					request.Header.Set(key+"-"+strconv.Itoa(i), chunk)
@@ -431,13 +460,14 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 			request.Header = c.GetRequestHeaderForBehavior(behavior)
 			if key := c.GetNormalizedUplinkDataKey(); key != "" {
 				encodedData := base64.RawURLEncoding.EncodeToString(data)
+				chunkSizeRange := c.GetNormalizedUplinkChunkSize()
 				if isCookieToken(key) {
 					var builder strings.Builder
 					if existingCookie := request.Header.Get("Cookie"); existingCookie != "" {
 						builder.WriteString(existingCookie)
 					}
 					for i := 0; len(encodedData) > 0; i++ {
-						chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
+						chunkSize := min(int(chunkSizeRange.rand()), len(encodedData))
 						chunk := encodedData[:chunkSize]
 						encodedData = encodedData[chunkSize:]
 						if builder.Len() > 0 {
@@ -452,7 +482,7 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 					request.Header.Set("Cookie", builder.String())
 				} else {
 					for i := 0; len(encodedData) > 0; i++ {
-						chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
+						chunkSize := min(int(chunkSizeRange.rand()), len(encodedData))
 						chunk := encodedData[:chunkSize]
 						encodedData = encodedData[chunkSize:]
 						request.AddCookie(&http.Cookie{Name: key + "_" + strconv.Itoa(i), Value: chunk})
