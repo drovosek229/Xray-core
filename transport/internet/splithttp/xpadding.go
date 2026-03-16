@@ -254,6 +254,32 @@ func setURLQueryParam(u *url.URL, key, value string) {
 	u.RawQuery = q.Encode()
 }
 
+func appendQueryParamToRawURL(rawURL, key, value string) (string, bool) {
+	if rawURL == "" || !isURLQueryComponentSafe(key) || !isURLQueryComponentSafe(value) {
+		return "", false
+	}
+
+	fragment := ""
+	if fragmentStart := strings.IndexByte(rawURL, '#'); fragmentStart >= 0 {
+		fragment = rawURL[fragmentStart:]
+		rawURL = rawURL[:fragmentStart]
+	}
+
+	queryStart := strings.IndexByte(rawURL, '?')
+	if queryStart < 0 {
+		return rawURL + "?" + key + "=" + value + fragment, true
+	}
+
+	rawQuery := rawURL[queryStart+1:]
+	if strings.IndexByte(rawQuery, ';') >= 0 || rawQueryHasKey(rawQuery, key) {
+		return "", false
+	}
+	if rawQuery == "" {
+		return rawURL + key + "=" + value + fragment, true
+	}
+	return rawURL + "&" + key + "=" + value + fragment, true
+}
+
 func extractQueryParamFromRawURL(rawURL, key string) (string, bool) {
 	if !isURLQueryComponentSafe(key) {
 		return "", false
@@ -322,6 +348,10 @@ func (c *Config) ApplyXPaddingToHeader(h http.Header, config XPaddingConfig) {
 	case PlacementHeader:
 		h.Set(p.Header, paddingValue)
 	case PlacementQueryInHeader:
+		if rawURL, ok := appendQueryParamToRawURL(p.RawURL, p.Key, paddingValue); ok {
+			h.Set(p.Header, rawURL)
+			return
+		}
 		u, err := url.Parse(p.RawURL)
 		if err != nil || u == nil {
 			return

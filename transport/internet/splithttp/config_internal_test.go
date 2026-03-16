@@ -42,6 +42,64 @@ func TestApplyXPaddingToHeaderPreservesExistingQuery(t *testing.T) {
 	}
 }
 
+func TestApplyXPaddingToHeaderPreservesFragment(t *testing.T) {
+	config := &Config{}
+	headers := make(http.Header)
+
+	config.ApplyXPaddingToHeader(headers, XPaddingConfig{
+		Length: 4,
+		Method: PaddingMethodRepeatX,
+		Placement: XPaddingPlacement{
+			Placement: PlacementQueryInHeader,
+			Key:       "x_padding",
+			Header:    "Referer",
+			RawURL:    "https://example.com/xhttp?ed=2048#frag",
+		},
+	})
+
+	referer := headers.Get("Referer")
+	if !strings.Contains(referer, "#frag") {
+		t.Fatalf("expected fragment to be preserved, got %q", referer)
+	}
+	refererURL, err := url.Parse(referer)
+	if err != nil {
+		t.Fatalf("failed to parse Referer header with fragment: %v", err)
+	}
+	if got := refererURL.Query().Get("x_padding"); got != "XXXX" {
+		t.Fatalf("expected x_padding to be added before fragment, got %q", got)
+	}
+	if refererURL.Fragment != "frag" {
+		t.Fatalf("expected fragment frag to be preserved, got %q", refererURL.Fragment)
+	}
+}
+
+func TestApplyXPaddingToHeaderReplacesDuplicatePaddingKey(t *testing.T) {
+	config := &Config{}
+	headers := make(http.Header)
+
+	config.ApplyXPaddingToHeader(headers, XPaddingConfig{
+		Length: 3,
+		Method: PaddingMethodRepeatX,
+		Placement: XPaddingPlacement{
+			Placement: PlacementQueryInHeader,
+			Key:       "x_padding",
+			Header:    "Referer",
+			RawURL:    "https://example.com/xhttp?x_padding=old&ed=2048",
+		},
+	})
+
+	refererURL, err := url.Parse(headers.Get("Referer"))
+	if err != nil {
+		t.Fatalf("failed to parse Referer header with duplicate key: %v", err)
+	}
+	if got := refererURL.Query().Get("x_padding"); got != "XXX" {
+		t.Fatalf("expected duplicate x_padding to be replaced, got %q", got)
+	}
+	if got := refererURL.Query().Get("ed"); got != "2048" {
+		t.Fatalf("expected other query values to be preserved, got %q", got)
+	}
+}
+
 func TestNormalizedXPaddingDefaultsForObfsMode(t *testing.T) {
 	config := &Config{XPaddingObfsMode: true}
 	paddingConfig := config.GetRequestPaddingConfig("https://example.com/test?ed=2048", nil)
