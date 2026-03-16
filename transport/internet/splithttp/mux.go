@@ -30,10 +30,11 @@ type XmuxClient struct {
 }
 
 type xmuxClientSnapshot struct {
-	xmuxClients []*XmuxClient
-	clientCount uint32
-	indexMask   uint32
-	powerOfTwo  bool
+	xmuxClients    []*XmuxClient
+	clientCount    uint32
+	indexMask      uint32
+	powerOfTwo     bool
+	allClosedFlags bool
 }
 
 type XmuxManager struct {
@@ -103,11 +104,20 @@ func (m *XmuxManager) publishXmuxClientsLocked() {
 		return
 	}
 
-	snapshot := &xmuxClientSnapshot{xmuxClients: append([]*XmuxClient(nil), m.xmuxClients...)}
+	snapshot := &xmuxClientSnapshot{
+		xmuxClients:    append([]*XmuxClient(nil), m.xmuxClients...),
+		allClosedFlags: true,
+	}
 	snapshot.clientCount = uint32(clientCount)
 	if snapshot.clientCount&(snapshot.clientCount-1) == 0 {
 		snapshot.powerOfTwo = true
 		snapshot.indexMask = snapshot.clientCount - 1
+	}
+	for _, xmuxClient := range snapshot.xmuxClients {
+		if xmuxClient.closedFlag == nil {
+			snapshot.allClosedFlags = false
+			break
+		}
 	}
 	m.fastXmuxSnapshot.Store(snapshot)
 }
@@ -197,6 +207,62 @@ func (m *XmuxManager) tryGetXmuxClientFast() *XmuxClient {
 	clientCount := int(snapshot.clientCount)
 
 	nextIndex := m.fastNextClientIndex.Add(1) - 1
+	if snapshot.allClosedFlags {
+		if snapshot.powerOfTwo {
+			start := int(nextIndex & snapshot.indexMask)
+			if m.concurrency <= 0 {
+				xmuxClient := xmuxClients[start]
+				if xmuxClient.closedFlag.Load() {
+					return nil
+				}
+				return xmuxClient
+			}
+			for scanned := uint32(0); scanned < snapshot.clientCount; scanned++ {
+				xmuxClient := xmuxClients[int((nextIndex+scanned)&snapshot.indexMask)]
+				if xmuxClient.OpenUsage.Load() >= m.concurrency {
+					continue
+				}
+				if xmuxClient.closedFlag.Load() {
+					return nil
+				}
+				return xmuxClient
+			}
+			return nil
+		}
+
+		start := int(nextIndex % snapshot.clientCount)
+		if m.concurrency <= 0 {
+			for scanned := 0; scanned < clientCount; scanned++ {
+				index := start + scanned
+				if index >= clientCount {
+					index -= clientCount
+				}
+				xmuxClient := xmuxClients[index]
+				if xmuxClient.closedFlag.Load() {
+					return nil
+				}
+				return xmuxClient
+			}
+			return nil
+		}
+
+		for scanned := 0; scanned < clientCount; scanned++ {
+			index := start + scanned
+			if index >= clientCount {
+				index -= clientCount
+			}
+			xmuxClient := xmuxClients[index]
+			if xmuxClient.OpenUsage.Load() >= m.concurrency {
+				continue
+			}
+			if xmuxClient.closedFlag.Load() {
+				return nil
+			}
+			return xmuxClient
+		}
+		return nil
+	}
+
 	if snapshot.powerOfTwo {
 		start := int(nextIndex & snapshot.indexMask)
 		if m.concurrency <= 0 {
