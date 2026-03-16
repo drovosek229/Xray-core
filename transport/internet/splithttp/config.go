@@ -6,10 +6,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/crypto"
 	"github.com/xtls/xray-core/common/utils"
 	"github.com/xtls/xray-core/transport/internet"
 )
@@ -157,6 +158,7 @@ func readRequestBody(body io.Reader, contentLength int64) ([]byte, error) {
 }
 
 var smallChunkIndexStrings [64]string
+var fastRangeRandState atomic.Uint64
 
 func chunkIndexString(index int) string {
 	if index >= 0 && index < len(smallChunkIndexStrings) {
@@ -665,13 +667,32 @@ func init() {
 	for i := range smallChunkIndexStrings {
 		smallChunkIndexStrings[i] = strconv.Itoa(i)
 	}
+	fastRangeRandState.Store(uint64(time.Now().UnixNano()) + 0x9e3779b97f4a7c15)
 	common.Must(internet.RegisterProtocolConfigCreator(protocolName, func() interface{} {
 		return new(Config)
 	}))
 }
 
+func fastRangeRandUint64() uint64 {
+	z := fastRangeRandState.Add(0x9e3779b97f4a7c15)
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+	z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+	return z ^ (z >> 31)
+}
+
 func (c RangeConfig) rand() int32 {
-	return int32(crypto.RandBetween(int64(c.From), int64(c.To)))
+	if c.From == c.To {
+		return c.From
+	}
+	from, to := c.From, c.To
+	if from > to {
+		from, to = to, from
+	}
+	span := uint64(int64(to) - int64(from))
+	if span == 0 {
+		return from
+	}
+	return int32(int64(from) + int64(fastRangeRandUint64()%span))
 }
 
 func appendToPath(path, value string) string {
