@@ -4,11 +4,11 @@
 Improve XHTTP (`transport/internet/splithttp`) with a focus on XMUX hot-path efficiency, safer/default-friendly request shaping, and compatibility fixes around xpadding/uplink metadata handling.
 
 ## Metrics
-- **Primary**: `xmux_ns_sum` (ns, lower is better)
+- **Primary**: `xhttp_ns_sum` (ns, lower is better)
 - **Secondary**: `bytes_sum`, `allocs_sum`
 
 ## How to Run
-`./autoresearch.sh` — runs the XHTTP XMUX microbenchmarks in `golang:1.26` and prints `METRIC name=value` lines. The workload now covers both power-of-two and non-power-of-two warm/concurrency XMUX pools to reduce overfitting to one pool shape.
+`./autoresearch.sh` — runs the XHTTP transport microbenchmarks in `golang:1.26` and prints `METRIC name=value` lines. The workload now covers both power-of-two and non-power-of-two XMUX pools plus packet-up request-shaping paths (`FillPacketRequest` across body/header/cookie payload placement variants) to reduce overfitting to one pool shape or only XMUX selection.
 
 ## Files in Scope
 - `transport/internet/splithttp/mux.go` — XMUX client pool selection and warm-connection behavior.
@@ -16,6 +16,8 @@ Improve XHTTP (`transport/internet/splithttp`) with a focus on XMUX hot-path eff
 - `transport/internet/splithttp/behavior.go` — balanced-profile request shaping.
 - `transport/internet/splithttp/xpadding.go` — xpadding placement/extraction helpers.
 - `transport/internet/splithttp/hub.go` — server-side request validation / payload extraction.
+- `transport/internet/splithttp/mux_benchmark_test.go` — XMUX selection benchmarks.
+- `transport/internet/splithttp/request_benchmark_test.go` — packet-up request-shaping benchmarks.
 - `transport/internet/splithttp/*_test.go` — targeted tests and benchmarks for XHTTP.
 
 ## Off Limits

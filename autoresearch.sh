@@ -7,13 +7,13 @@ repo_dir="$(pwd)"
 docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image" >/dev/null
 
 output="$(docker run --rm -v "$repo_dir":/src -w /src "$image" bash -lc '
-  /usr/local/go/bin/go test ./transport/internet/splithttp -run "^$" -bench "^BenchmarkXmuxManagerGetXmuxClient" -benchmem -count=5
+  /usr/local/go/bin/go test ./transport/internet/splithttp -run "^$" -bench "^(BenchmarkXmuxManagerGetXmuxClient|BenchmarkXHTTPRequestShaping)" -benchmem -count=5
 ' 2>&1)"
 
 printf '%s
 ' "$output"
 
-xmux_ns_sum="$(printf '%s
+xhttp_ns_sum="$(printf '%s
 ' "$output" | awk '
   /ns\/op/ {
     for (i = 1; i <= NF; i++) if ($i == "ns/op") { sum += $(i - 1); count++ }
@@ -35,6 +35,6 @@ allocs_sum="$(printf '%s
   END { printf "%.2f", sum }
 ')"
 
-echo "METRIC xmux_ns_sum=${xmux_ns_sum}"
+echo "METRIC xhttp_ns_sum=${xhttp_ns_sum}"
 echo "METRIC bytes_sum=${bytes_sum}"
 echo "METRIC allocs_sum=${allocs_sum}"
