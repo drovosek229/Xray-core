@@ -58,7 +58,7 @@ func (c *Config) GetRequestHeader() http.Header {
 		header.Add(k, v)
 	}
 	if header.Get("User-Agent") == "" {
-		header.Set("User-Agent", utils.ChromeUA)
+		header["User-Agent"] = []string{utils.ChromeUA}
 	}
 	return header
 }
