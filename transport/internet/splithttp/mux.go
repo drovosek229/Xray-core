@@ -40,11 +40,18 @@ type XmuxManager struct {
 }
 
 func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxManager {
+	concurrency := xmuxConfig.GetNormalizedMaxConcurrency().rand()
+	connections := xmuxConfig.GetNormalizedMaxConnections().rand()
+	warmConnections := xmuxConfig.GetNormalizedWarmConnections()
+	if connections > 0 && warmConnections > connections {
+		warmConnections = connections
+	}
+
 	manager := &XmuxManager{
 		xmuxConfig:      xmuxConfig,
-		concurrency:     xmuxConfig.GetNormalizedMaxConcurrency().rand(),
-		connections:     xmuxConfig.GetNormalizedMaxConnections().rand(),
-		warmConnections: xmuxConfig.GetNormalizedWarmConnections(),
+		concurrency:     concurrency,
+		connections:     connections,
+		warmConnections: warmConnections,
 		newConnFunc:     newConnFunc,
 		xmuxClients:     make([]*XmuxClient, 0),
 	}
@@ -295,28 +302,16 @@ func (m *XmuxManager) isUsableClientLocked(xmuxClient *XmuxClient, now time.Time
 		(xmuxClient.UnreusableAt == (time.Time{}) || !now.After(xmuxClient.UnreusableAt))
 }
 
-func (m *XmuxManager) desiredWarmConnectionsLocked() int {
-	if m.warmConnections <= 0 {
-		return 0
-	}
-
-	warmConnections := int(m.warmConnections)
-	if m.connections > 0 && warmConnections > int(m.connections) {
-		warmConnections = int(m.connections)
-	}
-	return warmConnections
-}
-
 func (m *XmuxManager) warmUsableCountLocked() int {
 	return m.usableCount
 }
 
 func (m *XmuxManager) fillWarmClientsLocked(ctx context.Context) {
-	target := m.desiredWarmConnectionsLocked()
-	if target == 0 {
+	if m.warmConnections <= 0 {
 		return
 	}
 
+	target := int(m.warmConnections)
 	for m.warmUsableCountLocked() < target {
 		if m.connections > 0 && len(m.xmuxClients) >= int(m.connections) {
 			return
@@ -341,8 +336,7 @@ func (m *XmuxManager) scheduleSweepCheckLocked() {
 }
 
 func (m *XmuxManager) scheduleWarmRefillLocked() {
-	target := m.desiredWarmConnectionsLocked()
-	if target == 0 || m.refillScheduled || m.usableCount >= target {
+	if m.warmConnections <= 0 || m.refillScheduled || m.usableCount >= int(m.warmConnections) {
 		return
 	}
 

@@ -1,3 +1,3 @@
 - Add a second XHTTP benchmark around packet-up request shaping (`FillPacketRequest`, `ApplyMetaToRequest`, xpadding placement) so optimization work can move beyond XMUX selection without overfitting the current XMUX microbenchmark.
 - Add explicit lazy-XMUX correctness tests for off-cursor request-limit and reusable-deadline expiry cases, now that off-cursor closed-client cleanup is covered.
-- Deprioritize further XMUX fast-path clock/branch micro-tuning unless new profiling shows a fresh hotspot: timer-armed sweep gating solved the dominant `time.Now()` cost, and several smaller reshuffles regressed.
+- Profile the post-timer/post-warm-target XMUX fast path before touching it again; the remaining cost is concentrated in mutex lock/unlock, `pickAvailableClientLocked`, `isUsableClientLocked`, and `scheduleWarmRefillLocked` rather than clock polling.
