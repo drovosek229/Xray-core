@@ -60,6 +60,17 @@ func TestBalancedResponseContentType(t *testing.T) {
 	}
 }
 
+func TestBalancedResponseContentTypeDefaultsWithoutAccept(t *testing.T) {
+	config := &Config{BehaviorProfile: BehaviorProfileBalanced}
+	request, err := http.NewRequest(http.MethodGet, "https://example.com/test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := config.GetResponseContentType(request); got != "application/octet-stream" {
+		t.Fatalf("expected default balanced content type, got %q", got)
+	}
+}
+
 func TestSessionOpenTimeoutReapsUnconnectedSession(t *testing.T) {
 	handler := &requestHandler{
 		ln:        &Listener{config: &Config{SessionOpenTimeoutSecs: 1}},

@@ -47,6 +47,10 @@ func (c *Config) GetNormalizedQuery() string {
 }
 
 func (c *Config) GetRequestHeader() http.Header {
+	if len(c.Headers) == 0 {
+		return http.Header{"User-Agent": []string{utils.ChromeUA}}
+	}
+
 	header := http.Header{}
 	for k, v := range c.Headers {
 		header.Add(k, v)
@@ -523,7 +527,7 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 		}
 	}
 
-	if request.Body != nil && request.Header.Get("Content-Type") == "" && c.IsBalancedBehaviorProfile() {
+	if request.Body != nil && c.IsBalancedBehaviorProfile() && request.Header.Get("Content-Type") == "" {
 		if contentType := behavior.UploadContentType(); contentType != "" {
 			if contentType != "application/grpc" || !c.NoGRPCHeader {
 				request.Header.Set("Content-Type", contentType)

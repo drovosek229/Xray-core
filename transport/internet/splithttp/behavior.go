@@ -271,7 +271,11 @@ func (c *Config) GetResponseContentType(request *http.Request) string {
 		return "text/event-stream"
 	}
 
-	accept := strings.ToLower(request.Header.Get("Accept"))
+	accept := request.Header.Get("Accept")
+	if accept == "" {
+		return "application/octet-stream"
+	}
+	accept = strings.ToLower(accept)
 	switch {
 	case strings.Contains(accept, "text/event-stream"):
 		if c.NoSSEHeader {
