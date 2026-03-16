@@ -71,7 +71,7 @@ func (c *Config) GetRequestHeaderWithPayload(payload []byte) http.Header {
 		chunkSize := min(int(chunkSizeRange.rand()), len(encodedData))
 		chunk := encodedData[:chunkSize]
 		encodedData = encodedData[chunkSize:]
-		headerKey := key + "-" + strconv.Itoa(i)
+		headerKey := key + "-" + chunkIndexString(i)
 		header.Set(headerKey, chunk)
 	}
 
@@ -92,7 +92,7 @@ func (c *Config) GetRequestCookiesWithPayload(payload []byte) []*http.Cookie {
 		chunkSize := min(int(chunkSizeRange.rand()), len(encodedData))
 		chunk := encodedData[:chunkSize]
 		encodedData = encodedData[chunkSize:]
-		cookieName := key + "_" + strconv.Itoa(i)
+		cookieName := key + "_" + chunkIndexString(i)
 		cookies = append(cookies, &http.Cookie{Name: cookieName, Value: chunk})
 	}
 
@@ -142,6 +142,15 @@ func readRequestBody(body io.Reader, contentLength int64) ([]byte, error) {
 	return io.ReadAll(body)
 }
 
+var smallChunkIndexStrings [64]string
+
+func chunkIndexString(index int) string {
+	if index >= 0 && index < len(smallChunkIndexStrings) {
+		return smallChunkIndexStrings[index]
+	}
+	return strconv.Itoa(index)
+}
+
 func estimateCookieHeaderLength(existingLen int, key string, encodedLen int, chunkSizeRange RangeConfig) int {
 	if encodedLen == 0 {
 		return existingLen
@@ -154,7 +163,7 @@ func estimateCookieHeaderLength(existingLen int, key string, encodedLen int, chu
 	if chunkCount < 1 {
 		chunkCount = 1
 	}
-	indexDigits := len(strconv.Itoa(chunkCount - 1))
+	indexDigits := len(chunkIndexString(chunkCount - 1))
 	separatorBytes := 2 * (chunkCount - 1)
 	if existingLen > 0 {
 		separatorBytes += 2
@@ -473,7 +482,7 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 					chunkSize := min(int(chunkSizeRange.rand()), len(encodedData))
 					chunk := encodedData[:chunkSize]
 					encodedData = encodedData[chunkSize:]
-					request.Header.Set(key+"-"+strconv.Itoa(i), chunk)
+					request.Header.Set(key+"-"+chunkIndexString(i), chunk)
 				}
 			}
 		case PlacementCookie:
@@ -497,7 +506,7 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 						}
 						builder.WriteString(key)
 						builder.WriteByte('_')
-						builder.WriteString(strconv.Itoa(i))
+						builder.WriteString(chunkIndexString(i))
 						builder.WriteByte('=')
 						builder.WriteString(chunk)
 					}
@@ -507,7 +516,7 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 						chunkSize := min(int(chunkSizeRange.rand()), len(encodedData))
 						chunk := encodedData[:chunkSize]
 						encodedData = encodedData[chunkSize:]
-						request.AddCookie(&http.Cookie{Name: key + "_" + strconv.Itoa(i), Value: chunk})
+						request.AddCookie(&http.Cookie{Name: key + "_" + chunkIndexString(i), Value: chunk})
 					}
 				}
 			}
@@ -639,6 +648,9 @@ func (m *XmuxConfig) GetNormalizedWarmConnections() int32 {
 }
 
 func init() {
+	for i := range smallChunkIndexStrings {
+		smallChunkIndexStrings[i] = strconv.Itoa(i)
+	}
 	common.Must(internet.RegisterProtocolConfigCreator(protocolName, func() interface{} {
 		return new(Config)
 	}))
