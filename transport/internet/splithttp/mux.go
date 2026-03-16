@@ -230,7 +230,8 @@ func (m *XmuxManager) removeXmuxClientLocked(index int) {
 }
 
 func (m *XmuxManager) pickAvailableClientClosedOnlyLocked(ctx context.Context) *XmuxClient {
-	clientCount := len(m.xmuxClients)
+	xmuxClients := m.xmuxClients
+	clientCount := len(xmuxClients)
 	if clientCount == 0 {
 		m.nextClientIndex = 0
 		m.usableCount = 0
@@ -246,7 +247,7 @@ func (m *XmuxManager) pickAvailableClientClosedOnlyLocked(ctx context.Context) *
 		if start >= clientCount {
 			start = 0
 		}
-		xmuxClient := m.xmuxClients[start]
+		xmuxClient := xmuxClients[start]
 		scanned += 1
 		if xmuxClient.XmuxConn.IsClosed() {
 			errors.LogDebug(ctx, "XMUX: removing xmuxClient, IsClosed() = ", xmuxClient.XmuxConn.IsClosed(),
@@ -255,7 +256,8 @@ func (m *XmuxManager) pickAvailableClientClosedOnlyLocked(ctx context.Context) *
 				", LeftRequests = ", xmuxClient.LeftRequests.Load(),
 				", UnreusableAt = ", xmuxClient.UnreusableAt)
 			m.removeXmuxClientLocked(start)
-			clientCount -= 1
+			xmuxClients = m.xmuxClients
+			clientCount = len(xmuxClients)
 			scanned -= 1
 			if clientCount == 0 {
 				m.nextClientIndex = 0
@@ -340,7 +342,8 @@ func (m *XmuxManager) pickAvailableClientWithoutDeadlineOrConcurrencyLocked(ctx 
 }
 
 func (m *XmuxManager) pickAvailableClientWithoutDeadlineNoReuseLocked(ctx context.Context) *XmuxClient {
-	clientCount := len(m.xmuxClients)
+	xmuxClients := m.xmuxClients
+	clientCount := len(xmuxClients)
 	if clientCount == 0 {
 		m.nextClientIndex = 0
 		m.usableCount = 0
@@ -356,7 +359,7 @@ func (m *XmuxManager) pickAvailableClientWithoutDeadlineNoReuseLocked(ctx contex
 		if start >= clientCount {
 			start = 0
 		}
-		xmuxClient := m.xmuxClients[start]
+		xmuxClient := xmuxClients[start]
 		openUsage := xmuxClient.OpenUsage.Load()
 		scanned += 1
 		if m.concurrency > 0 && openUsage >= m.concurrency {
@@ -370,7 +373,8 @@ func (m *XmuxManager) pickAvailableClientWithoutDeadlineNoReuseLocked(ctx contex
 				", LeftRequests = ", xmuxClient.LeftRequests.Load(),
 				", UnreusableAt = ", xmuxClient.UnreusableAt)
 			m.removeXmuxClientLocked(start)
-			clientCount -= 1
+			xmuxClients = m.xmuxClients
+			clientCount = len(xmuxClients)
 			scanned -= 1
 			if clientCount == 0 {
 				m.nextClientIndex = 0
