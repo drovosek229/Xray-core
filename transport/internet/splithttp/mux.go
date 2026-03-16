@@ -76,13 +76,30 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 }
 
 func (m *XmuxManager) publishXmuxClientsLocked() {
-	if len(m.xmuxClients) == 0 {
+	clientCount := len(m.xmuxClients)
+	if clientCount == 0 {
+		m.fastXmuxSnapshot.Store(nil)
+		return
+	}
+	if m.connections > 0 && clientCount < int(m.connections) {
+		m.fastXmuxSnapshot.Store(nil)
+		return
+	}
+	if m.xmuxConfig.HMaxReusableSecs != nil && m.xmuxConfig.HMaxReusableSecs.To > 0 {
+		m.fastXmuxSnapshot.Store(nil)
+		return
+	}
+	if m.xmuxConfig.HMaxRequestTimes != nil && m.xmuxConfig.HMaxRequestTimes.To > 0 {
+		m.fastXmuxSnapshot.Store(nil)
+		return
+	}
+	if m.xmuxConfig.CMaxReuseTimes != nil && m.xmuxConfig.CMaxReuseTimes.To > 0 {
 		m.fastXmuxSnapshot.Store(nil)
 		return
 	}
 
 	snapshot := &xmuxClientSnapshot{xmuxClients: append([]*XmuxClient(nil), m.xmuxClients...)}
-	snapshot.clientCount = uint32(len(snapshot.xmuxClients))
+	snapshot.clientCount = uint32(clientCount)
 	if snapshot.clientCount&(snapshot.clientCount-1) == 0 {
 		snapshot.powerOfTwo = true
 		snapshot.indexMask = snapshot.clientCount - 1
@@ -162,15 +179,6 @@ func (m *XmuxManager) tryGetXmuxClientFast() *XmuxClient {
 	if m.sweepDueFlag.Load() {
 		return nil
 	}
-	if m.xmuxConfig.HMaxReusableSecs != nil && m.xmuxConfig.HMaxReusableSecs.To > 0 {
-		return nil
-	}
-	if m.xmuxConfig.HMaxRequestTimes != nil && m.xmuxConfig.HMaxRequestTimes.To > 0 {
-		return nil
-	}
-	if m.xmuxConfig.CMaxReuseTimes != nil && m.xmuxConfig.CMaxReuseTimes.To > 0 {
-		return nil
-	}
 
 	snapshot := m.fastXmuxSnapshot.Load()
 	if snapshot == nil {
@@ -178,9 +186,6 @@ func (m *XmuxManager) tryGetXmuxClientFast() *XmuxClient {
 	}
 	xmuxClients := snapshot.xmuxClients
 	clientCount := int(snapshot.clientCount)
-	if m.connections > 0 && clientCount < int(m.connections) {
-		return nil
-	}
 
 	nextIndex := m.fastNextClientIndex.Add(1) - 1
 	if snapshot.powerOfTwo {
