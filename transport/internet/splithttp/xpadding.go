@@ -290,9 +290,7 @@ func (c *Config) ApplyXPaddingToHeader(h http.Header, config XPaddingConfig) {
 		if err != nil || u == nil {
 			return
 		}
-		q := u.Query()
-		q.Set(p.Key, paddingValue)
-		u.RawQuery = q.Encode()
+		setURLQueryParam(u, p.Key, paddingValue)
 		h.Set(p.Header, u.String())
 	}
 }
