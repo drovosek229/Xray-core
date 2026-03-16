@@ -145,8 +145,42 @@ func GeneratePadding(method PaddingMethod, length int) string {
 	}
 }
 
+func isCookieValueSafe(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		switch c := value[i]; {
+		case c <= 0x20 || c >= 0x7f:
+			return false
+		case c == '"' || c == ',' || c == ';' || c == '\\':
+			return false
+		}
+	}
+	return true
+}
+
+func appendCookieHeader(header http.Header, name, value string) bool {
+	if header == nil || !isCookieToken(name) || !isCookieValueSafe(value) {
+		return false
+	}
+
+	cookie := name + "=" + value
+	if existing := header["Cookie"]; len(existing) > 0 {
+		cookie = strings.Join(existing, "; ") + "; " + cookie
+	}
+	header.Set("Cookie", cookie)
+	return true
+}
+
 func ApplyPaddingToCookie(req *http.Request, name, value string) {
 	if req == nil || name == "" || value == "" {
+		return
+	}
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
+	if appendCookieHeader(req.Header, name, value) {
 		return
 	}
 	req.AddCookie(&http.Cookie{
@@ -167,13 +201,61 @@ func ApplyPaddingToResponseCookie(writer http.ResponseWriter, name, value string
 	})
 }
 
-func ApplyPaddingToQuery(u *url.URL, key, value string) {
+func isURLQueryComponentSafe(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		switch c := value[i]; {
+		case '0' <= c && c <= '9':
+		case 'a' <= c && c <= 'z':
+		case 'A' <= c && c <= 'Z':
+		case c == '-' || c == '.' || c == '_' || c == '~':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func rawQueryHasKey(rawQuery, key string) bool {
+	for rawQuery != "" {
+		part := rawQuery
+		if i := strings.IndexByte(rawQuery, '&'); i >= 0 {
+			part = rawQuery[:i]
+			rawQuery = rawQuery[i+1:]
+		} else {
+			rawQuery = ""
+		}
+		if j := strings.IndexByte(part, '='); j >= 0 {
+			part = part[:j]
+		}
+		if part == key {
+			return true
+		}
+	}
+	return false
+}
+
+func setURLQueryParam(u *url.URL, key, value string) {
 	if u == nil || key == "" || value == "" {
+		return
+	}
+	if isURLQueryComponentSafe(key) && isURLQueryComponentSafe(value) && strings.IndexByte(u.RawQuery, ';') < 0 && !rawQueryHasKey(u.RawQuery, key) {
+		if u.RawQuery == "" {
+			u.RawQuery = key + "=" + value
+		} else {
+			u.RawQuery += "&" + key + "=" + value
+		}
 		return
 	}
 	q := u.Query()
 	q.Set(key, value)
 	u.RawQuery = q.Encode()
+}
+
+func ApplyPaddingToQuery(u *url.URL, key, value string) {
+	setURLQueryParam(u, key, value)
 }
 
 func (c *Config) GetNormalizedXPaddingBytes() RangeConfig {

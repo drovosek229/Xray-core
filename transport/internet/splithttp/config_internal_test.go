@@ -3,6 +3,7 @@ package splithttp
 import (
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -113,5 +114,65 @@ func TestGetRequestHeaderWithPayloadLeavesBaseHeadersWhenPayloadKeyUnavailable(t
 	cookies := config.GetRequestCookiesWithPayload(nil)
 	if len(cookies) != 0 {
 		t.Fatal("expected no cookies when payload placement does not use keyed transport")
+	}
+}
+
+func TestApplyMetaToRequestPreservesAndReplacesQueryValues(t *testing.T) {
+	config := &Config{
+		SessionPlacement: PlacementQuery,
+		SessionKey:       "sid",
+		SeqPlacement:     PlacementQuery,
+		SeqKey:           "seq",
+	}
+
+	request, err := http.NewRequest(http.MethodPost, "https://example.com/test?foo=bar&sid=old", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	config.ApplyMetaToRequest(request, "session-new", "42")
+
+	query := request.URL.Query()
+	if got := query.Get("foo"); got != "bar" {
+		t.Fatalf("expected existing query value to be preserved, got %q", got)
+	}
+	if got := query.Get("sid"); got != "session-new" {
+		t.Fatalf("expected sid query value to be replaced, got %q", got)
+	}
+	if got := query.Get("seq"); got != "42" {
+		t.Fatalf("expected seq query value to be appended, got %q", got)
+	}
+}
+
+func TestApplyMetaToRequestCookiePathKeepsExistingCookiesVisible(t *testing.T) {
+	config := &Config{
+		SessionPlacement: PlacementCookie,
+		SessionKey:       "sid",
+		SeqPlacement:     PlacementCookie,
+		SeqKey:           "seq",
+	}
+
+	request, err := http.NewRequest(http.MethodPost, "https://example.com/test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Cookie", "pref=1")
+
+	config.ApplyMetaToRequest(request, "session-cookie", "43")
+
+	cookieHeader := request.Header.Get("Cookie")
+	for _, want := range []string{"pref=1", "sid=session-cookie", "seq=43"} {
+		if !strings.Contains(cookieHeader, want) {
+			t.Fatalf("expected cookie header %q to contain %q", cookieHeader, want)
+		}
+	}
+	for name, want := range map[string]string{"pref": "1", "sid": "session-cookie", "seq": "43"} {
+		cookie, err := request.Cookie(name)
+		if err != nil {
+			t.Fatalf("expected cookie %q to be readable: %v", name, err)
+		}
+		if cookie.Value != want {
+			t.Fatalf("expected cookie %q=%q, got %q", name, want, cookie.Value)
+		}
 	}
 }

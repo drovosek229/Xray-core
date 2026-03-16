@@ -383,13 +383,13 @@ func (c *Config) ApplyMetaToRequest(req *http.Request, sessionId string, seqStr 
 		case PlacementPath:
 			req.URL.Path = appendToPath(req.URL.Path, sessionId)
 		case PlacementQuery:
-			q := req.URL.Query()
-			q.Set(sessionKey, sessionId)
-			req.URL.RawQuery = q.Encode()
+			setURLQueryParam(req.URL, sessionKey, sessionId)
 		case PlacementHeader:
 			req.Header.Set(sessionKey, sessionId)
 		case PlacementCookie:
-			req.AddCookie(&http.Cookie{Name: sessionKey, Value: sessionId})
+			if !appendCookieHeader(req.Header, sessionKey, sessionId) {
+				req.AddCookie(&http.Cookie{Name: sessionKey, Value: sessionId})
+			}
 		}
 	}
 
@@ -398,13 +398,13 @@ func (c *Config) ApplyMetaToRequest(req *http.Request, sessionId string, seqStr 
 		case PlacementPath:
 			req.URL.Path = appendToPath(req.URL.Path, seqStr)
 		case PlacementQuery:
-			q := req.URL.Query()
-			q.Set(seqKey, seqStr)
-			req.URL.RawQuery = q.Encode()
+			setURLQueryParam(req.URL, seqKey, seqStr)
 		case PlacementHeader:
 			req.Header.Set(seqKey, seqStr)
 		case PlacementCookie:
-			req.AddCookie(&http.Cookie{Name: seqKey, Value: seqStr})
+			if !appendCookieHeader(req.Header, seqKey, seqStr) {
+				req.AddCookie(&http.Cookie{Name: seqKey, Value: seqStr})
+			}
 		}
 	}
 }
