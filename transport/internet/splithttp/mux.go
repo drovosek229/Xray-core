@@ -217,9 +217,12 @@ func (m *XmuxManager) tryGetXmuxClientFast() *XmuxClient {
 				}
 				return xmuxClient
 			}
+			mask := int(snapshot.indexMask)
+			index := int(nextIndex) & mask
 			for scanned := uint32(0); scanned < snapshot.clientCount; scanned++ {
-				xmuxClient := xmuxClients[int((nextIndex+scanned)&snapshot.indexMask)]
+				xmuxClient := xmuxClients[index]
 				if xmuxClient.OpenUsage.Load() >= m.concurrency {
+					index = (index + 1) & mask
 					continue
 				}
 				if xmuxClient.closedFlag.Load() {
