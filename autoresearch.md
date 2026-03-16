@@ -31,5 +31,7 @@ Improve XHTTP (`transport/internet/splithttp`) with a focus on XMUX hot-path eff
 
 ## What's Been Tried
 - Added a dedicated XMUX benchmark harness so pool-selection changes can be measured directly.
-- Initial hypothesis: `XmuxManager.GetXmuxClient` spends avoidable time allocating/filtering candidate slices and using cryptographic randomness for non-security-sensitive client selection.
-- Secondary hypothesis: several XHTTP config fields are too brittle when left empty (xpadding/uplink data keys), which can produce malformed header/cookie names or ineffective obfuscation.
+- Baseline on the new harness: `xmux_ns_sum=25229`.
+- Initial hypothesis confirmed: `XmuxManager.GetXmuxClient` spent avoidable time allocating/filtering candidate slices and using cryptographic randomness for non-security-sensitive client selection.
+- Kept candidate: switched XMUX selection to a per-manager pseudo-random picker under the existing mutex, removed per-call candidate-slice allocation, and compacted unusable-client removal in place. This dropped the benchmark to `xmux_ns_sum=4170.20` with `0 B/op` and `0 allocs/op` on the benchmark harness.
+- Secondary hypothesis addressed in the same kept candidate: several XHTTP config fields were too brittle when left empty (xpadding/uplink data keys). Added normalization defaults, query-preserving Referer padding, and coverage tests.

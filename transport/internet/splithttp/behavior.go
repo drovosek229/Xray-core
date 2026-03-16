@@ -292,16 +292,16 @@ func (c *Config) GetRequestPaddingConfig(requestURL string, behavior *RequestBeh
 
 	if c.XPaddingObfsMode {
 		config.Placement = XPaddingPlacement{
-			Placement: c.XPaddingPlacement,
-			Key:       c.XPaddingKey,
-			Header:    c.XPaddingHeader,
+			Placement: c.GetNormalizedXPaddingPlacement(),
+			Key:       c.GetNormalizedXPaddingKey(),
+			Header:    c.GetNormalizedXPaddingHeader(),
 			RawURL:    requestURL,
 		}
-		config.Method = PaddingMethod(c.XPaddingMethod)
+		config.Method = PaddingMethod(c.GetNormalizedXPaddingMethod())
 		return config
 	}
 
-	config.Method = PaddingMethod(c.XPaddingMethod)
+	config.Method = PaddingMethod(c.GetNormalizedXPaddingMethod())
 	if !c.IsBalancedBehaviorProfile() {
 		config.Placement = XPaddingPlacement{
 			Placement: PlacementQueryInHeader,

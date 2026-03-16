@@ -156,11 +156,11 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 	if h.config.XPaddingObfsMode {
 		config.Placement = XPaddingPlacement{
-			Placement: h.config.XPaddingPlacement,
-			Key:       h.config.XPaddingKey,
-			Header:    h.config.XPaddingHeader,
+			Placement: h.config.GetNormalizedXPaddingPlacement(),
+			Key:       h.config.GetNormalizedXPaddingKey(),
+			Header:    h.config.GetNormalizedXPaddingHeader(),
 		}
-		config.Method = PaddingMethod(h.config.XPaddingMethod)
+		config.Method = PaddingMethod(h.config.GetNormalizedXPaddingMethod())
 	} else {
 		config.Placement = XPaddingPlacement{
 			Placement: PlacementHeader,
@@ -186,7 +186,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	validRange := h.config.GetNormalizedXPaddingBytes()
 	paddingValue, paddingPlacement := h.config.ExtractXPaddingFromRequest(request, h.config.XPaddingObfsMode)
 
-	if !h.config.IsPaddingValid(paddingValue, validRange.From, validRange.To, PaddingMethod(h.config.XPaddingMethod)) {
+	if !h.config.IsPaddingValid(paddingValue, validRange.From, validRange.To, PaddingMethod(h.config.GetNormalizedXPaddingMethod())) {
 		errors.LogInfo(context.Background(), "invalid padding ("+paddingPlacement+") length:", int32(len(paddingValue)))
 		writer.WriteHeader(http.StatusBadRequest)
 		return
@@ -248,7 +248,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		isUplinkRequest = true
 	}
 
-	uplinkDataKey := h.config.UplinkDataKey
+	uplinkDataKey := h.config.GetNormalizedUplinkDataKey()
 
 	if isUplinkRequest && sessionId != "" { // stream-up, packet-up
 		if seqStr == "" {

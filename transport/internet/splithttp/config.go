@@ -60,7 +60,10 @@ func (c *Config) GetRequestHeader() http.Header {
 func (c *Config) GetRequestHeaderWithPayload(payload []byte) http.Header {
 	header := c.GetRequestHeader()
 
-	key := c.UplinkDataKey
+	key := c.GetNormalizedUplinkDataKey()
+	if key == "" {
+		return header
+	}
 	encodedData := base64.RawURLEncoding.EncodeToString(payload)
 
 	for i := 0; len(encodedData) > 0; i++ {
@@ -77,7 +80,10 @@ func (c *Config) GetRequestHeaderWithPayload(payload []byte) http.Header {
 func (c *Config) GetRequestCookiesWithPayload(payload []byte) []*http.Cookie {
 	cookies := []*http.Cookie{}
 
-	key := c.UplinkDataKey
+	key := c.GetNormalizedUplinkDataKey()
+	if key == "" {
+		return cookies
+	}
 	encodedData := base64.RawURLEncoding.EncodeToString(payload)
 
 	for i := 0; len(encodedData) > 0; i++ {
@@ -102,7 +108,7 @@ func (c *Config) WriteResponseHeader(writer http.ResponseWriter, requestMethod s
 
 	if c.GetNormalizedSessionPlacement() == PlacementCookie ||
 		c.GetNormalizedSeqPlacement() == PlacementCookie ||
-		c.XPaddingPlacement == PlacementCookie ||
+		c.GetNormalizedXPaddingPlacement() == PlacementCookie ||
 		c.GetNormalizedUplinkDataPlacement() == PlacementCookie {
 		writer.Header().Set("Access-Control-Allow-Credentials", "true")
 	}
@@ -125,11 +131,11 @@ func (c *Config) WriteResponseHeader(writer http.ResponseWriter, requestMethod s
 }
 
 func (c *Config) GetNormalizedUplinkHTTPMethod() string {
-	if c.UplinkHTTPMethod == "" {
-		return "POST"
+	if method := strings.TrimSpace(c.UplinkHTTPMethod); method != "" {
+		return strings.ToUpper(method)
 	}
 
-	return c.UplinkHTTPMethod
+	return "POST"
 }
 
 func (c *Config) GetNormalizedScMaxEachPostBytes() RangeConfig {
@@ -238,6 +244,59 @@ func (c *Config) GetNormalizedUplinkDataPlacement() string {
 		return PlacementBody
 	}
 	return c.UplinkDataPlacement
+}
+
+func (c *Config) GetNormalizedUplinkDataKey() string {
+	if c.UplinkDataKey != "" {
+		return c.UplinkDataKey
+	}
+	switch c.GetNormalizedUplinkDataPlacement() {
+	case PlacementHeader:
+		return "X-Data"
+	case PlacementCookie, PlacementQuery:
+		return "x_data"
+	default:
+		return ""
+	}
+}
+
+func (c *Config) GetNormalizedXPaddingPlacement() string {
+	if c.XPaddingPlacement != "" {
+		return c.XPaddingPlacement
+	}
+	return PlacementQueryInHeader
+}
+
+func (c *Config) GetNormalizedXPaddingKey() string {
+	if c.XPaddingKey != "" {
+		return c.XPaddingKey
+	}
+	return "x_padding"
+}
+
+func (c *Config) GetNormalizedXPaddingHeader() string {
+	if c.XPaddingHeader != "" {
+		return c.XPaddingHeader
+	}
+	switch c.GetNormalizedXPaddingPlacement() {
+	case PlacementHeader:
+		return "X-Padding"
+	case PlacementQueryInHeader:
+		return "Referer"
+	default:
+		return ""
+	}
+}
+
+func (c *Config) GetNormalizedXPaddingMethod() string {
+	switch PaddingMethod(c.XPaddingMethod) {
+	case PaddingMethodTokenish:
+		return string(PaddingMethodTokenish)
+	case PaddingMethodRepeatX:
+		return string(PaddingMethodRepeatX)
+	default:
+		return string(PaddingMethodRepeatX)
+	}
 }
 
 func (c *Config) GetNormalizedSessionKey() string {

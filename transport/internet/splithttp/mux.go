@@ -2,9 +2,8 @@ package splithttp
 
 import (
 	"context"
-	"crypto/rand"
 	"math"
-	"math/big"
+	mathrand "math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,6 +32,7 @@ type XmuxManager struct {
 	newConnFunc     func() XmuxConn
 	xmuxClients     []*XmuxClient
 	refillScheduled bool
+	rng             *mathrand.Rand
 }
 
 func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxManager {
@@ -43,6 +43,7 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 		warmConnections: xmuxConfig.GetNormalizedWarmConnections(),
 		newConnFunc:     newConnFunc,
 		xmuxClients:     make([]*XmuxClient, 0),
+		rng:             mathrand.New(mathrand.NewSource(time.Now().UnixNano())),
 	}
 	manager.access.Lock()
 	manager.fillWarmClientsLocked(context.Background())
@@ -90,26 +91,14 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 		return xmuxClient
 	}
 
-	xmuxClients := make([]*XmuxClient, 0)
-	if m.concurrency > 0 {
-		for _, xmuxClient := range m.xmuxClients {
-			if xmuxClient.OpenUsage.Load() < m.concurrency {
-				xmuxClients = append(xmuxClients, xmuxClient)
-			}
-		}
-	} else {
-		xmuxClients = m.xmuxClients
-	}
-
-	if len(xmuxClients) == 0 {
+	xmuxClient := m.pickAvailableClientLocked()
+	if xmuxClient == nil {
 		errors.LogDebug(ctx, "XMUX: creating xmuxClient because maxConcurrency was hit, xmuxClients = ", len(m.xmuxClients))
-		xmuxClient := m.newXmuxClient()
+		xmuxClient = m.newXmuxClient()
 		m.scheduleWarmRefillLocked()
 		return xmuxClient
 	}
 
-	i, _ := rand.Int(rand.Reader, big.NewInt(int64(len(xmuxClients))))
-	xmuxClient := xmuxClients[i.Int64()]
 	if xmuxClient.leftUsage > 0 {
 		xmuxClient.leftUsage -= 1
 	}
@@ -117,20 +106,41 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 	return xmuxClient
 }
 
+func (m *XmuxManager) pickAvailableClientLocked() *XmuxClient {
+	var selected *XmuxClient
+	eligible := 0
+
+	for _, xmuxClient := range m.xmuxClients {
+		if m.concurrency > 0 && xmuxClient.OpenUsage.Load() >= m.concurrency {
+			continue
+		}
+		eligible++
+		if m.rng.Intn(eligible) == 0 {
+			selected = xmuxClient
+		}
+	}
+
+	return selected
+}
+
 func (m *XmuxManager) removeUnusableClientsLocked(ctx context.Context) {
-	for i := 0; i < len(m.xmuxClients); {
-		xmuxClient := m.xmuxClients[i]
-		if !m.isUsableClientLocked(xmuxClient, time.Now()) {
+	now := time.Now()
+	kept := m.xmuxClients[:0]
+
+	for _, xmuxClient := range m.xmuxClients {
+		if !m.isUsableClientLocked(xmuxClient, now) {
 			errors.LogDebug(ctx, "XMUX: removing xmuxClient, IsClosed() = ", xmuxClient.XmuxConn.IsClosed(),
 				", OpenUsage = ", xmuxClient.OpenUsage.Load(),
 				", leftUsage = ", xmuxClient.leftUsage,
 				", LeftRequests = ", xmuxClient.LeftRequests.Load(),
 				", UnreusableAt = ", xmuxClient.UnreusableAt)
-			m.xmuxClients = append(m.xmuxClients[:i], m.xmuxClients[i+1:]...)
-		} else {
-			i++
+			continue
 		}
+		kept = append(kept, xmuxClient)
 	}
+
+	clear(m.xmuxClients[len(kept):])
+	m.xmuxClients = kept
 }
 
 func (m *XmuxManager) isUsableClientLocked(xmuxClient *XmuxClient, now time.Time) bool {

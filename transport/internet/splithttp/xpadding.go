@@ -208,7 +208,9 @@ func (c *Config) ApplyXPaddingToHeader(h http.Header, config XPaddingConfig) {
 		if err != nil || u == nil {
 			return
 		}
-		u.RawQuery = p.Key + "=" + paddingValue
+		q := u.Query()
+		q.Set(p.Key, paddingValue)
+		u.RawQuery = q.Encode()
 		h.Set(p.Header, u.String())
 	}
 }
@@ -274,8 +276,9 @@ func (c *Config) ExtractXPaddingFromRequest(req *http.Request, obfsMode bool) (s
 		}
 	}
 
-	key := c.XPaddingKey
-	header := c.XPaddingHeader
+	key := c.GetNormalizedXPaddingKey()
+	header := c.GetNormalizedXPaddingHeader()
+	placement := c.GetNormalizedXPaddingPlacement()
 
 	if cookie, err := req.Cookie(key); err == nil {
 		if cookie != nil && cookie.Value != "" {
@@ -288,7 +291,7 @@ func (c *Config) ExtractXPaddingFromRequest(req *http.Request, obfsMode bool) (s
 	headerValue := req.Header.Get(header)
 
 	if headerValue != "" {
-		if c.XPaddingPlacement == PlacementHeader {
+		if placement == PlacementHeader {
 			paddingPlacement := PlacementHeader + "=" + header
 			return headerValue, paddingPlacement
 		}
