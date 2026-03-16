@@ -38,7 +38,7 @@ type XmuxManager struct {
 	newConnFunc         func() XmuxConn
 	xmuxClients         []*XmuxClient
 	fastXmuxSnapshot    atomic.Pointer[xmuxClientSnapshot]
-	fastNextClientIndex atomic.Uint64
+	fastNextClientIndex atomic.Uint32
 	nextClientIndex     int
 	sweepDue            bool
 	sweepDueFlag        atomic.Bool
@@ -172,7 +172,7 @@ func (m *XmuxManager) tryGetXmuxClientFast() *XmuxClient {
 		return nil
 	}
 
-	start := int((m.fastNextClientIndex.Add(1) - 1) % uint64(clientCount))
+	start := int((m.fastNextClientIndex.Add(1) - 1) % uint32(clientCount))
 	if m.concurrency <= 0 {
 		for scanned := 0; scanned < clientCount; scanned++ {
 			index := start + scanned
