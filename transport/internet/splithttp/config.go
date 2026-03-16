@@ -142,6 +142,26 @@ func readRequestBody(body io.Reader, contentLength int64) ([]byte, error) {
 	return io.ReadAll(body)
 }
 
+func estimateCookieHeaderLength(existingLen int, key string, encodedLen int, chunkSizeRange RangeConfig) int {
+	if encodedLen == 0 {
+		return existingLen
+	}
+	minChunkSize := int(chunkSizeRange.From)
+	if minChunkSize <= 0 {
+		minChunkSize = 1
+	}
+	chunkCount := (encodedLen + minChunkSize - 1) / minChunkSize
+	if chunkCount < 1 {
+		chunkCount = 1
+	}
+	indexDigits := len(strconv.Itoa(chunkCount - 1))
+	separatorBytes := 2 * (chunkCount - 1)
+	if existingLen > 0 {
+		separatorBytes += 2
+	}
+	return existingLen + encodedLen + separatorBytes + chunkCount*(len(key)+2+indexDigits)
+}
+
 func (c *Config) WriteResponseHeader(writer http.ResponseWriter, requestMethod string, requestHeader http.Header) {
 	// CORS headers for the browser dialer
 	if origin := requestHeader.Get("Origin"); origin == "" {
@@ -463,7 +483,9 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 				chunkSizeRange := c.GetNormalizedUplinkChunkSize()
 				if isCookieToken(key) {
 					var builder strings.Builder
-					if existingCookie := request.Header.Get("Cookie"); existingCookie != "" {
+					existingCookie := request.Header.Get("Cookie")
+					builder.Grow(estimateCookieHeaderLength(len(existingCookie), key, len(encodedData), chunkSizeRange))
+					if existingCookie != "" {
 						builder.WriteString(existingCookie)
 					}
 					for i := 0; len(encodedData) > 0; i++ {
