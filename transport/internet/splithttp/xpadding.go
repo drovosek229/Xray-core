@@ -254,6 +254,42 @@ func setURLQueryParam(u *url.URL, key, value string) {
 	u.RawQuery = q.Encode()
 }
 
+func extractQueryParamFromRawURL(rawURL, key string) (string, bool) {
+	if !isURLQueryComponentSafe(key) {
+		return "", false
+	}
+	queryStart := strings.IndexByte(rawURL, '?')
+	if queryStart < 0 || queryStart+1 >= len(rawURL) {
+		return "", false
+	}
+	query := rawURL[queryStart+1:]
+	if fragmentStart := strings.IndexByte(query, '#'); fragmentStart >= 0 {
+		query = query[:fragmentStart]
+	}
+	for query != "" {
+		part := query
+		if i := strings.IndexByte(query, '&'); i >= 0 {
+			part = query[:i]
+			query = query[i+1:]
+		} else {
+			query = ""
+		}
+		value := ""
+		if i := strings.IndexByte(part, '='); i >= 0 {
+			value = part[i+1:]
+			part = part[:i]
+		}
+		if part != key {
+			continue
+		}
+		if isURLQueryComponentSafe(value) {
+			return value, true
+		}
+		return "", false
+	}
+	return "", false
+}
+
 func ApplyPaddingToQuery(u *url.URL, key, value string) {
 	setURLQueryParam(u, key, value)
 }
@@ -345,6 +381,10 @@ func (c *Config) ExtractXPaddingFromRequest(req *http.Request, obfsMode bool) (s
 		referrer := req.Header.Get("Referer")
 
 		if referrer != "" {
+			if paddingValue, ok := extractQueryParamFromRawURL(referrer, "x_padding"); ok {
+				paddingPlacement := PlacementQueryInHeader + "=Referer, key=x_padding"
+				return paddingValue, paddingPlacement
+			}
 			if referrerURL, err := url.Parse(referrer); err == nil {
 				paddingValue := referrerURL.Query().Get("x_padding")
 				paddingPlacement := PlacementQueryInHeader + "=Referer, key=x_padding"
@@ -376,6 +416,10 @@ func (c *Config) ExtractXPaddingFromRequest(req *http.Request, obfsMode bool) (s
 			return headerValue, paddingPlacement
 		}
 
+		if paddingValue, ok := extractQueryParamFromRawURL(headerValue, key); ok {
+			paddingPlacement := PlacementQueryInHeader + "=" + header + ", key=" + key
+			return paddingValue, paddingPlacement
+		}
 		if parsedURL, err := url.Parse(headerValue); err == nil {
 			paddingPlacement := PlacementQueryInHeader + "=" + header + ", key=" + key
 
