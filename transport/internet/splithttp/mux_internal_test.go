@@ -15,6 +15,10 @@ func (c *internalClosableXmuxConn) IsClosed() bool {
 	return c.closed.Load()
 }
 
+func (c *internalClosableXmuxConn) xmuxClosedFlag() *atomic.Bool {
+	return &c.closed
+}
+
 func TestXmuxScheduledSweepRemovesOffCursorClosedClient(t *testing.T) {
 	var created atomic.Int32
 	createdClients := make([]*internalClosableXmuxConn, 0, 3)

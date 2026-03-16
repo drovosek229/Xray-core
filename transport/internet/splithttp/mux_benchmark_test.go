@@ -2,12 +2,17 @@ package splithttp
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 )
+
+var benchmarkXmuxConnClosed atomic.Bool
 
 type benchmarkXmuxConn struct{}
 
 func (benchmarkXmuxConn) IsClosed() bool { return false }
+
+func (benchmarkXmuxConn) xmuxClosedFlag() *atomic.Bool { return &benchmarkXmuxConnClosed }
 
 func BenchmarkXmuxManagerGetXmuxClientWarmPool(b *testing.B) {
 	ctx := context.Background()

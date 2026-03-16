@@ -14,10 +14,15 @@ type XmuxConn interface {
 	IsClosed() bool
 }
 
+type xmuxClosedFlagConn interface {
+	xmuxClosedFlag() *atomic.Bool
+}
+
 const xmuxHealthSweepInterval = 250 * time.Millisecond
 
 type XmuxClient struct {
 	XmuxConn     XmuxConn
+	closedFlag   *atomic.Bool
 	OpenUsage    atomic.Int32
 	leftUsage    int32
 	LeftRequests atomic.Int32
@@ -108,9 +113,13 @@ func (m *XmuxManager) publishXmuxClientsLocked() {
 }
 
 func (m *XmuxManager) newXmuxClient() *XmuxClient {
+	conn := m.newConnFunc()
 	xmuxClient := &XmuxClient{
-		XmuxConn:  m.newConnFunc(),
+		XmuxConn:  conn,
 		leftUsage: -1,
+	}
+	if closedFlagConn, ok := conn.(xmuxClosedFlagConn); ok {
+		xmuxClient.closedFlag = closedFlagConn.xmuxClosedFlag()
 	}
 	if x := m.xmuxConfig.GetNormalizedCMaxReuseTimes().rand(); x > 0 {
 		xmuxClient.leftUsage = x - 1
@@ -192,7 +201,11 @@ func (m *XmuxManager) tryGetXmuxClientFast() *XmuxClient {
 		start := int(nextIndex & snapshot.indexMask)
 		if m.concurrency <= 0 {
 			xmuxClient := xmuxClients[start]
-			if xmuxClient.XmuxConn.IsClosed() {
+			if closedFlag := xmuxClient.closedFlag; closedFlag != nil {
+				if closedFlag.Load() {
+					return nil
+				}
+			} else if xmuxClient.XmuxConn.IsClosed() {
 				return nil
 			}
 			return xmuxClient
@@ -202,7 +215,11 @@ func (m *XmuxManager) tryGetXmuxClientFast() *XmuxClient {
 			if xmuxClient.OpenUsage.Load() >= m.concurrency {
 				continue
 			}
-			if xmuxClient.XmuxConn.IsClosed() {
+			if closedFlag := xmuxClient.closedFlag; closedFlag != nil {
+				if closedFlag.Load() {
+					return nil
+				}
+			} else if xmuxClient.XmuxConn.IsClosed() {
 				return nil
 			}
 			return xmuxClient
