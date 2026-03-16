@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/xtls/xray-core/common"
@@ -95,6 +96,23 @@ func (c *Config) GetRequestCookiesWithPayload(payload []byte) []*http.Cookie {
 	}
 
 	return cookies
+}
+
+func isCookieToken(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		switch c := name[i]; {
+		case '0' <= c && c <= '9':
+		case 'a' <= c && c <= 'z':
+		case 'A' <= c && c <= 'Z':
+		case c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Config) WriteResponseHeader(writer http.ResponseWriter, requestMethod string, requestHeader http.Header) {
@@ -414,11 +432,32 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 			request.Header = c.GetRequestHeaderForBehavior(behavior)
 			if key := c.GetNormalizedUplinkDataKey(); key != "" {
 				encodedData := base64.RawURLEncoding.EncodeToString(data)
-				for i := 0; len(encodedData) > 0; i++ {
-					chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
-					chunk := encodedData[:chunkSize]
-					encodedData = encodedData[chunkSize:]
-					request.AddCookie(&http.Cookie{Name: fmt.Sprintf("%s_%d", key, i), Value: chunk})
+				if isCookieToken(key) {
+					var builder strings.Builder
+					if existingCookie := request.Header.Get("Cookie"); existingCookie != "" {
+						builder.WriteString(existingCookie)
+					}
+					for i := 0; len(encodedData) > 0; i++ {
+						chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
+						chunk := encodedData[:chunkSize]
+						encodedData = encodedData[chunkSize:]
+						if builder.Len() > 0 {
+							builder.WriteString("; ")
+						}
+						builder.WriteString(key)
+						builder.WriteByte('_')
+						builder.WriteString(strconv.Itoa(i))
+						builder.WriteByte('=')
+						builder.WriteString(chunk)
+					}
+					request.Header.Set("Cookie", builder.String())
+				} else {
+					for i := 0; len(encodedData) > 0; i++ {
+						chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
+						chunk := encodedData[:chunkSize]
+						encodedData = encodedData[chunkSize:]
+						request.AddCookie(&http.Cookie{Name: fmt.Sprintf("%s_%d", key, i), Value: chunk})
+					}
 				}
 			}
 		}
