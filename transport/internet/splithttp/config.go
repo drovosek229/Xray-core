@@ -401,19 +401,25 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 		switch dataPlacement {
 		case PlacementHeader:
 			request.Header = c.GetRequestHeaderForBehavior(behavior)
-			for key, values := range c.GetRequestHeaderWithPayload(data) {
-				if len(values) == 0 {
-					continue
-				}
-				request.Header.Del(key)
-				for _, value := range values {
-					request.Header.Add(key, value)
+			if key := c.GetNormalizedUplinkDataKey(); key != "" {
+				encodedData := base64.RawURLEncoding.EncodeToString(data)
+				for i := 0; len(encodedData) > 0; i++ {
+					chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
+					chunk := encodedData[:chunkSize]
+					encodedData = encodedData[chunkSize:]
+					request.Header.Set(fmt.Sprintf("%s-%d", key, i), chunk)
 				}
 			}
 		case PlacementCookie:
 			request.Header = c.GetRequestHeaderForBehavior(behavior)
-			for _, cookie := range c.GetRequestCookiesWithPayload(data) {
-				request.AddCookie(cookie)
+			if key := c.GetNormalizedUplinkDataKey(); key != "" {
+				encodedData := base64.RawURLEncoding.EncodeToString(data)
+				for i := 0; len(encodedData) > 0; i++ {
+					chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
+					chunk := encodedData[:chunkSize]
+					encodedData = encodedData[chunkSize:]
+					request.AddCookie(&http.Cookie{Name: fmt.Sprintf("%s_%d", key, i), Value: chunk})
+				}
 			}
 		}
 	}
