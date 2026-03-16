@@ -70,7 +70,6 @@ func (m *XmuxManager) newXmuxClient() *XmuxClient {
 
 func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when locking
 	m.access.Lock()
-	defer m.access.Unlock()
 
 	xmuxClient, usableCount := m.sweepAndPickAvailableClientLocked(ctx)
 
@@ -78,6 +77,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 		errors.LogDebug(ctx, "XMUX: creating xmuxClient because xmuxClients is empty")
 		xmuxClient = m.newXmuxClient()
 		m.scheduleWarmRefillLocked(usableCount + 1)
+		m.access.Unlock()
 		return xmuxClient
 	}
 
@@ -85,6 +85,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 		errors.LogDebug(ctx, "XMUX: creating xmuxClient because maxConnections was not hit, xmuxClients = ", len(m.xmuxClients))
 		xmuxClient = m.newXmuxClient()
 		m.scheduleWarmRefillLocked(usableCount + 1)
+		m.access.Unlock()
 		return xmuxClient
 	}
 
@@ -92,6 +93,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 		errors.LogDebug(ctx, "XMUX: creating xmuxClient because maxConcurrency was hit, xmuxClients = ", len(m.xmuxClients))
 		xmuxClient = m.newXmuxClient()
 		m.scheduleWarmRefillLocked(usableCount + 1)
+		m.access.Unlock()
 		return xmuxClient
 	}
 
@@ -102,6 +104,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 		}
 	}
 	m.scheduleWarmRefillLocked(usableCount)
+	m.access.Unlock()
 	return xmuxClient
 }
 

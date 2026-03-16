@@ -37,4 +37,5 @@ Improve XHTTP (`transport/internet/splithttp`) with a focus on XMUX hot-path eff
 - Kept follow-up: fused XMUX unusable-client sweeping, eligible-client selection, and warm-pool accounting into the same locked pass. That reduced the harness again to `xmux_ns_sum=2043.80` while preserving `0 B/op` and `0 allocs/op`.
 - Kept polish: removed a redundant pre-selection warm-refill scheduling check, trimming the harness further to `xmux_ns_sum=1931.90`.
 - Kept follow-up: replaced reservoir-style pseudo-random XMUX client selection with a one-pass round-robin cursor over the compacted usable client slice. This preserved fair reuse without per-eligible RNG work and reduced the harness again to `xmux_ns_sum=1632.60`.
+- Kept polish: removed the `defer`-based unlock from `GetXmuxClient` and switched to explicit unlocks on each return path. This trimmed the harness further to `xmux_ns_sum=1567.20`.
 - Secondary hypothesis addressed in the same kept work: several XHTTP config fields were too brittle when left empty (xpadding/uplink data keys). Added normalization defaults, query-preserving Referer padding, method normalization, and coverage tests.
