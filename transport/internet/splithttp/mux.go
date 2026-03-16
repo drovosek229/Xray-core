@@ -257,13 +257,14 @@ func (m *XmuxManager) tryGetXmuxClientFast() *XmuxClient {
 			return nil
 		}
 
+		index := start
 		for scanned := 0; scanned < clientCount; scanned++ {
-			index := start + scanned
-			if index >= clientCount {
-				index -= clientCount
-			}
 			xmuxClient := xmuxClients[index]
 			if xmuxClient.OpenUsage.Load() >= m.concurrency {
+				index += 1
+				if index == clientCount {
+					index = 0
+				}
 				continue
 			}
 			if xmuxClient.closedFlag.Load() {
