@@ -259,18 +259,30 @@ func appendQueryParamToRawURL(rawURL, key, value string) (string, bool) {
 		return "", false
 	}
 
+	special := byte(0)
+	specialStart := -1
+	for i := 0; i < len(rawURL); i++ {
+		c := rawURL[i]
+		if c == '?' || c == '#' {
+			special = c
+			specialStart = i
+			break
+		}
+	}
+	if specialStart < 0 {
+		return rawURL + "?" + key + "=" + value, true
+	}
+	if special == '#' {
+		return rawURL[:specialStart] + "?" + key + "=" + value + rawURL[specialStart:], true
+	}
+
 	fragment := ""
-	if fragmentStart := strings.IndexByte(rawURL, '#'); fragmentStart >= 0 {
-		fragment = rawURL[fragmentStart:]
-		rawURL = rawURL[:fragmentStart]
+	rawQuery := rawURL[specialStart+1:]
+	if fragmentStart := strings.IndexByte(rawQuery, '#'); fragmentStart >= 0 {
+		fragment = rawQuery[fragmentStart:]
+		rawQuery = rawQuery[:fragmentStart]
+		rawURL = rawURL[:specialStart+1+fragmentStart]
 	}
-
-	queryStart := strings.IndexByte(rawURL, '?')
-	if queryStart < 0 {
-		return rawURL + "?" + key + "=" + value + fragment, true
-	}
-
-	rawQuery := rawURL[queryStart+1:]
 	if strings.IndexByte(rawQuery, ';') >= 0 || rawQueryHasKey(rawQuery, key) {
 		return "", false
 	}
