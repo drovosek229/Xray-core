@@ -38,6 +38,7 @@ errorgen
 *.dat
 
 # Build assets
+/build/
 /build_assets/
 
 # Output from dlv test
