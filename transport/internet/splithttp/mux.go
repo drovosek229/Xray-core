@@ -140,6 +140,12 @@ func (m *XmuxManager) pickXmuxClientLocked(ctx context.Context) *XmuxClient {
 		return m.pickAvailableClientWithDeadlineLocked(ctx, time.Now())
 	}
 	if m.xmuxConfig.HMaxRequestTimes == nil || m.xmuxConfig.HMaxRequestTimes.To <= 0 {
+		if m.xmuxConfig.CMaxReuseTimes == nil || m.xmuxConfig.CMaxReuseTimes.To <= 0 {
+			if m.concurrency <= 0 {
+				return m.pickAvailableClientClosedOnlyLocked(ctx)
+			}
+			return m.pickAvailableClientWithoutDeadlineNoReuseLocked(ctx)
+		}
 		if m.concurrency <= 0 {
 			return m.pickAvailableClientWithoutDeadlineOrConcurrencyLocked(ctx)
 		}
@@ -218,6 +224,61 @@ func (m *XmuxManager) removeXmuxClientLocked(index int) {
 	}
 }
 
+func (m *XmuxManager) pickAvailableClientClosedOnlyLocked(ctx context.Context) *XmuxClient {
+	clientCount := len(m.xmuxClients)
+	if clientCount == 0 {
+		m.nextClientIndex = 0
+		m.usableCount = 0
+		return nil
+	}
+
+	start := m.nextClientIndex
+	if start >= clientCount {
+		start = 0
+	}
+
+	for scanned := 0; scanned < clientCount && clientCount > 0; {
+		if start >= clientCount {
+			start = 0
+		}
+		xmuxClient := m.xmuxClients[start]
+		scanned += 1
+		if xmuxClient.XmuxConn.IsClosed() {
+			errors.LogDebug(ctx, "XMUX: removing xmuxClient, IsClosed() = ", xmuxClient.XmuxConn.IsClosed(),
+				", OpenUsage = ", xmuxClient.OpenUsage.Load(),
+				", leftUsage = ", xmuxClient.leftUsage,
+				", LeftRequests = ", xmuxClient.LeftRequests.Load(),
+				", UnreusableAt = ", xmuxClient.UnreusableAt)
+			m.removeXmuxClientLocked(start)
+			clientCount -= 1
+			scanned -= 1
+			if clientCount == 0 {
+				m.nextClientIndex = 0
+				m.usableCount = 0
+				return nil
+			}
+			if start < m.nextClientIndex && m.nextClientIndex > 0 {
+				m.nextClientIndex -= 1
+			}
+			continue
+		}
+
+		m.nextClientIndex = start + 1
+		if m.nextClientIndex >= clientCount {
+			m.nextClientIndex = 0
+		}
+		return xmuxClient
+	}
+
+	if m.nextClientIndex >= clientCount {
+		m.nextClientIndex = 0
+	}
+	if m.usableCount > clientCount {
+		m.usableCount = clientCount
+	}
+	return nil
+}
+
 func (m *XmuxManager) pickAvailableClientWithoutDeadlineOrConcurrencyLocked(ctx context.Context) *XmuxClient {
 	clientCount := len(m.xmuxClients)
 	if clientCount == 0 {
@@ -240,6 +301,66 @@ func (m *XmuxManager) pickAvailableClientWithoutDeadlineOrConcurrencyLocked(ctx 
 		if xmuxClient.XmuxConn.IsClosed() || xmuxClient.leftUsage == 0 {
 			errors.LogDebug(ctx, "XMUX: removing xmuxClient, IsClosed() = ", xmuxClient.XmuxConn.IsClosed(),
 				", OpenUsage = ", xmuxClient.OpenUsage.Load(),
+				", leftUsage = ", xmuxClient.leftUsage,
+				", LeftRequests = ", xmuxClient.LeftRequests.Load(),
+				", UnreusableAt = ", xmuxClient.UnreusableAt)
+			m.removeXmuxClientLocked(start)
+			clientCount -= 1
+			scanned -= 1
+			if clientCount == 0 {
+				m.nextClientIndex = 0
+				m.usableCount = 0
+				return nil
+			}
+			if start < m.nextClientIndex && m.nextClientIndex > 0 {
+				m.nextClientIndex -= 1
+			}
+			continue
+		}
+
+		m.nextClientIndex = start + 1
+		if m.nextClientIndex >= clientCount {
+			m.nextClientIndex = 0
+		}
+		return xmuxClient
+	}
+
+	if m.nextClientIndex >= clientCount {
+		m.nextClientIndex = 0
+	}
+	if m.usableCount > clientCount {
+		m.usableCount = clientCount
+	}
+	return nil
+}
+
+func (m *XmuxManager) pickAvailableClientWithoutDeadlineNoReuseLocked(ctx context.Context) *XmuxClient {
+	clientCount := len(m.xmuxClients)
+	if clientCount == 0 {
+		m.nextClientIndex = 0
+		m.usableCount = 0
+		return nil
+	}
+
+	start := m.nextClientIndex
+	if start >= clientCount {
+		start = 0
+	}
+
+	for scanned := 0; scanned < clientCount && clientCount > 0; {
+		if start >= clientCount {
+			start = 0
+		}
+		xmuxClient := m.xmuxClients[start]
+		openUsage := xmuxClient.OpenUsage.Load()
+		scanned += 1
+		if m.concurrency > 0 && openUsage >= m.concurrency {
+			start += 1
+			continue
+		}
+		if xmuxClient.XmuxConn.IsClosed() {
+			errors.LogDebug(ctx, "XMUX: removing xmuxClient, IsClosed() = ", xmuxClient.XmuxConn.IsClosed(),
+				", OpenUsage = ", openUsage,
 				", leftUsage = ", xmuxClient.leftUsage,
 				", LeftRequests = ", xmuxClient.LeftRequests.Load(),
 				", UnreusableAt = ", xmuxClient.UnreusableAt)
