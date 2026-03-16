@@ -50,10 +50,12 @@ func (c *Config) GetNormalizedQuery() string {
 
 func (c *Config) GetRequestHeader() http.Header {
 	if len(c.Headers) == 0 {
-		return http.Header{"User-Agent": []string{utils.ChromeUA}}
+		header := make(http.Header, 1)
+		header["User-Agent"] = []string{utils.ChromeUA}
+		return header
 	}
 
-	header := http.Header{}
+	header := make(http.Header, len(c.Headers)+1)
 	for k, v := range c.Headers {
 		header.Add(k, v)
 	}
