@@ -2,7 +2,6 @@ package splithttp
 
 import (
 	"encoding/base64"
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -71,7 +70,7 @@ func (c *Config) GetRequestHeaderWithPayload(payload []byte) http.Header {
 		chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
 		chunk := encodedData[:chunkSize]
 		encodedData = encodedData[chunkSize:]
-		headerKey := fmt.Sprintf("%s-%d", key, i)
+		headerKey := key + "-" + strconv.Itoa(i)
 		header.Set(headerKey, chunk)
 	}
 
@@ -91,7 +90,7 @@ func (c *Config) GetRequestCookiesWithPayload(payload []byte) []*http.Cookie {
 		chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
 		chunk := encodedData[:chunkSize]
 		encodedData = encodedData[chunkSize:]
-		cookieName := fmt.Sprintf("%s_%d", key, i)
+		cookieName := key + "_" + strconv.Itoa(i)
 		cookies = append(cookies, &http.Cookie{Name: cookieName, Value: chunk})
 	}
 
@@ -425,7 +424,7 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 					chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
 					chunk := encodedData[:chunkSize]
 					encodedData = encodedData[chunkSize:]
-					request.Header.Set(fmt.Sprintf("%s-%d", key, i), chunk)
+					request.Header.Set(key+"-"+strconv.Itoa(i), chunk)
 				}
 			}
 		case PlacementCookie:
@@ -456,7 +455,7 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 						chunkSize := min(int(c.GetNormalizedUplinkChunkSize().rand()), len(encodedData))
 						chunk := encodedData[:chunkSize]
 						encodedData = encodedData[chunkSize:]
-						request.AddCookie(&http.Cookie{Name: fmt.Sprintf("%s_%d", key, i), Value: chunk})
+						request.AddCookie(&http.Cookie{Name: key + "_" + strconv.Itoa(i), Value: chunk})
 					}
 				}
 			}
