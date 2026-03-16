@@ -18,15 +18,24 @@ import (
 )
 
 var (
+	// These bytes are preserved for upstream protocol compatibility and are used
+	// by REALITY's session identifier path.
 	Version_x byte = 26
 	Version_y byte = 2
 	Version_z byte = 6
 )
 
 var (
-	build    = "Custom"
-	codename = "Xray, Penetrates Everything."
-	intro    = "A unified platform for anti-censorship."
+	ProductVersion_x byte = 1
+	ProductVersion_y byte = 0
+	ProductVersion_z byte = 0
+)
+
+var (
+	build       = "Custom"
+	productName = "internet core"
+	codename    = "internet"
+	intro       = "A fork-owned Xray core for the internet client."
 )
 
 func init() {
@@ -57,16 +66,26 @@ func init() {
 	}
 }
 
-// Version returns Xray's version as a string, in the form of "x.y.z" where x, y and z are numbers.
+// ProductName returns the product name for this fork's user-visible versioning.
+func ProductName() string {
+	return productName
+}
+
+// UpstreamVersion returns the upstream Xray compatibility version used by this fork.
+func UpstreamVersion() string {
+	return fmt.Sprintf("%v.%v.%v", Version_x, Version_y, Version_z)
+}
+
+// Version returns this fork's product version as a string, in the form of "x.y.z" where x, y and z are numbers.
 // ".z" part may be omitted in regular releases.
 func Version() string {
-	return fmt.Sprintf("%v.%v.%v", Version_x, Version_y, Version_z)
+	return fmt.Sprintf("%v.%v.%v", ProductVersion_x, ProductVersion_y, ProductVersion_z)
 }
 
 // VersionStatement returns a list of strings representing the full version info.
 func VersionStatement() []string {
 	return []string{
-		serial.Concat("Xray ", Version(), " (", codename, ") ", build, " (", runtime.Version(), " ", runtime.GOOS, "/", runtime.GOARCH, ")"),
+		serial.Concat(ProductName(), " ", Version(), " (", codename, "; based on Xray ", UpstreamVersion(), ") ", build, " (", runtime.Version(), " ", runtime.GOOS, "/", runtime.GOARCH, ")"),
 		intro,
 	}
 }
