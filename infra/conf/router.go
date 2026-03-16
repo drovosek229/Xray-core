@@ -97,6 +97,10 @@ func (c *RouterConfig) getDomainStrategy() router.Config_DomainStrategy {
 }
 
 func (c *RouterConfig) Build() (*router.Config, error) {
+	return c.buildWithAssetResolver(nil)
+}
+
+func (c *RouterConfig) buildWithAssetResolver(resolver geoAssetPathProvider) (*router.Config, error) {
 	config := new(router.Config)
 	config.DomainStrategy = c.getDomainStrategy()
 
@@ -106,7 +110,7 @@ func (c *RouterConfig) Build() (*router.Config, error) {
 	}
 
 	for _, rawRule := range rawRuleList {
-		rule, err := parseRule(rawRule)
+		rule, err := parseRuleWithAssetResolver(rawRule, resolver)
 		if err != nil {
 			return nil, err
 		}
@@ -178,12 +182,16 @@ func parseIP(s string) (*router.CIDR, error) {
 }
 
 func loadFile(file, code string) ([]byte, error) {
+	return loadFileWithAssetResolver(file, code, nil)
+}
+
+func loadFileWithAssetResolver(file, code string, resolver geoAssetPathProvider) ([]byte, error) {
 	runtime.GC()
-	r, err := filesystem.OpenAsset(file)
-	defer r.Close()
+	r, err := filesystem.NewFileReader(resolveGeoAssetPath(file, resolver))
 	if err != nil {
 		return nil, errors.New("failed to open file: ", file).Base(err)
 	}
+	defer r.Close()
 	bs := find(r, []byte(code))
 	if bs == nil {
 		return nil, errors.New("code not found in ", file, ": ", code)
@@ -192,7 +200,11 @@ func loadFile(file, code string) ([]byte, error) {
 }
 
 func loadIP(file, code string) ([]*router.CIDR, error) {
-	bs, err := loadFile(file, code)
+	return loadIPWithAssetResolver(file, code, nil)
+}
+
+func loadIPWithAssetResolver(file, code string, resolver geoAssetPathProvider) ([]*router.CIDR, error) {
+	bs, err := loadFileWithAssetResolver(file, code, resolver)
 	if err != nil {
 		return nil, err
 	}
@@ -205,6 +217,10 @@ func loadIP(file, code string) ([]*router.CIDR, error) {
 }
 
 func loadSite(file, code string) ([]*router.Domain, error) {
+	return loadSiteWithAssetResolver(file, code, nil)
+}
+
+func loadSiteWithAssetResolver(file, code string, resolver geoAssetPathProvider) ([]*router.Domain, error) {
 
 	// Check if domain matcher cache is provided via environment
 	domainMatcherPath := platform.NewEnvFlag(platform.MphCachePath).GetValue(func() string { return "" })
@@ -212,7 +228,7 @@ func loadSite(file, code string) ([]*router.Domain, error) {
 		return []*router.Domain{{}}, nil
 	}
 
-	bs, err := loadFile(file, code)
+	bs, err := loadFileWithAssetResolver(file, code, resolver)
 	if err != nil {
 		return nil, err
 	}
@@ -342,13 +358,17 @@ func parseAttrs(attrs []string) *AttributeList {
 }
 
 func loadGeositeWithAttr(file string, siteWithAttr string) ([]*router.Domain, error) {
+	return loadGeositeWithAttrWithAssetResolver(file, siteWithAttr, nil)
+}
+
+func loadGeositeWithAttrWithAssetResolver(file string, siteWithAttr string, resolver geoAssetPathProvider) ([]*router.Domain, error) {
 	parts := strings.Split(siteWithAttr, "@")
 	if len(parts) == 0 {
 		return nil, errors.New("empty site")
 	}
 	country := strings.ToUpper(parts[0])
 	attrs := parseAttrs(parts[1:])
-	domains, err := loadSite(file, country)
+	domains, err := loadSiteWithAssetResolver(file, country, resolver)
 	if err != nil {
 		return nil, err
 	}
@@ -368,9 +388,13 @@ func loadGeositeWithAttr(file string, siteWithAttr string) ([]*router.Domain, er
 }
 
 func parseDomainRule(domain string) ([]*router.Domain, error) {
+	return parseDomainRuleWithAssetResolver(domain, nil)
+}
+
+func parseDomainRuleWithAssetResolver(domain string, resolver geoAssetPathProvider) ([]*router.Domain, error) {
 	if strings.HasPrefix(domain, "geosite:") {
 		country := strings.ToUpper(domain[8:])
-		domains, err := loadGeositeWithAttr("geosite.dat", country)
+		domains, err := loadGeositeWithAttrWithAssetResolver("geosite.dat", country, resolver)
 		if err != nil {
 			return nil, errors.New("failed to load geosite: ", country).Base(err)
 		}
@@ -394,7 +418,7 @@ func parseDomainRule(domain string) ([]*router.Domain, error) {
 		}
 		filename := kv[0]
 		country := kv[1]
-		domains, err := loadGeositeWithAttr(filename, country)
+		domains, err := loadGeositeWithAttrWithAssetResolver(filename, country, nil)
 		if err != nil {
 			return nil, errors.New("failed to load external sites: ", country, " from ", filename).Base(err)
 		}
@@ -438,6 +462,10 @@ func parseDomainRule(domain string) ([]*router.Domain, error) {
 }
 
 func ToCidrList(ips StringList) ([]*router.GeoIP, error) {
+	return ToCidrListWithAssetResolver(ips, nil)
+}
+
+func ToCidrListWithAssetResolver(ips StringList, resolver geoAssetPathProvider) ([]*router.GeoIP, error) {
 	var geoipList []*router.GeoIP
 	var customCidrs []*router.CIDR
 
@@ -452,7 +480,7 @@ func ToCidrList(ips StringList) ([]*router.GeoIP, error) {
 			if len(country) == 0 {
 				return nil, errors.New("empty country name in rule")
 			}
-			geoip, err := loadIP("geoip.dat", strings.ToUpper(country))
+			geoip, err := loadIPWithAssetResolver("geoip.dat", strings.ToUpper(country), resolver)
 			if err != nil {
 				return nil, errors.New("failed to load GeoIP: ", country).Base(err)
 			}
@@ -492,7 +520,7 @@ func ToCidrList(ips StringList) ([]*router.GeoIP, error) {
 				country = country[1:]
 				isReverseMatch = true
 			}
-			geoip, err := loadIP(filename, strings.ToUpper(country))
+			geoip, err := loadIPWithAssetResolver(filename, strings.ToUpper(country), nil)
 			if err != nil {
 				return nil, errors.New("failed to load IPs: ", country, " from ", filename).Base(err)
 			}
@@ -529,6 +557,10 @@ type WebhookRuleConfig struct {
 }
 
 func parseFieldRule(msg json.RawMessage) (*router.RoutingRule, error) {
+	return parseFieldRuleWithAssetResolver(msg, nil)
+}
+
+func parseFieldRuleWithAssetResolver(msg json.RawMessage, resolver geoAssetPathProvider) (*router.RoutingRule, error) {
 	type RawFieldRule struct {
 		RouterRule
 		Domain     *StringList        `json:"domain"`
@@ -572,7 +604,7 @@ func parseFieldRule(msg json.RawMessage) (*router.RoutingRule, error) {
 
 	if rawFieldRule.Domain != nil {
 		for _, domain := range *rawFieldRule.Domain {
-			rules, err := parseDomainRule(domain)
+			rules, err := parseDomainRuleWithAssetResolver(domain, resolver)
 			if err != nil {
 				return nil, errors.New("failed to parse domain rule: ", domain).Base(err)
 			}
@@ -582,7 +614,7 @@ func parseFieldRule(msg json.RawMessage) (*router.RoutingRule, error) {
 
 	if rawFieldRule.Domains != nil {
 		for _, domain := range *rawFieldRule.Domains {
-			rules, err := parseDomainRule(domain)
+			rules, err := parseDomainRuleWithAssetResolver(domain, resolver)
 			if err != nil {
 				return nil, errors.New("failed to parse domain rule: ", domain).Base(err)
 			}
@@ -591,7 +623,7 @@ func parseFieldRule(msg json.RawMessage) (*router.RoutingRule, error) {
 	}
 
 	if rawFieldRule.IP != nil {
-		geoipList, err := ToCidrList(*rawFieldRule.IP)
+		geoipList, err := ToCidrListWithAssetResolver(*rawFieldRule.IP, resolver)
 		if err != nil {
 			return nil, err
 		}
@@ -611,7 +643,7 @@ func parseFieldRule(msg json.RawMessage) (*router.RoutingRule, error) {
 	}
 
 	if rawFieldRule.SourceIP != nil {
-		geoipList, err := ToCidrList(*rawFieldRule.SourceIP)
+		geoipList, err := ToCidrListWithAssetResolver(*rawFieldRule.SourceIP, resolver)
 		if err != nil {
 			return nil, err
 		}
@@ -623,7 +655,7 @@ func parseFieldRule(msg json.RawMessage) (*router.RoutingRule, error) {
 	}
 
 	if rawFieldRule.LocalIP != nil {
-		geoipList, err := ToCidrList(*rawFieldRule.LocalIP)
+		geoipList, err := ToCidrListWithAssetResolver(*rawFieldRule.LocalIP, resolver)
 		if err != nil {
 			return nil, err
 		}
@@ -676,13 +708,17 @@ func parseFieldRule(msg json.RawMessage) (*router.RoutingRule, error) {
 }
 
 func parseRule(msg json.RawMessage) (*router.RoutingRule, error) {
+	return parseRuleWithAssetResolver(msg, nil)
+}
+
+func parseRuleWithAssetResolver(msg json.RawMessage, resolver geoAssetPathProvider) (*router.RoutingRule, error) {
 	rawRule := new(RouterRule)
 	err := json.Unmarshal(msg, rawRule)
 	if err != nil {
 		return nil, errors.New("invalid router rule").Base(err)
 	}
 
-	fieldrule, err := parseFieldRule(msg)
+	fieldrule, err := parseFieldRuleWithAssetResolver(msg, resolver)
 	if err != nil {
 		return nil, errors.New("invalid field rule").Base(err)
 	}

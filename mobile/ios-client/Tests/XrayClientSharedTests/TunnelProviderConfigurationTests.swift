@@ -9,7 +9,11 @@ final class TunnelProviderConfigurationTests: XCTestCase {
             activeTunnelTarget: .manual(UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!),
             targetName: "direct-put",
             runtimeConfigJSON: #"{"inbounds":[],"outbounds":[]}"#,
-            routePolicy: .disabled
+            routePolicy: .disabled,
+            remoteGeoAssetSettings: RemoteGeoAssetSettings(
+                geoIPURLString: "https://example.com/geoip.dat",
+                geoSiteURLString: "https://example.com/geosite.dat"
+            )
         )
 
         let data = try JSONEncoder().encode(envelope)

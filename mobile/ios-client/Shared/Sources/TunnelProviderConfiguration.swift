@@ -57,6 +57,7 @@ struct TunnelProviderConfigurationEnvelope: Codable, Hashable, Sendable {
     var createdAt: Date
     var configHash: String
     var routePolicy: TunnelRoutePolicy
+    var remoteGeoAssetSettings: RemoteGeoAssetSettings?
 
     init(
         sessionID: UUID = UUID(),
@@ -64,7 +65,8 @@ struct TunnelProviderConfigurationEnvelope: Codable, Hashable, Sendable {
         targetName: String,
         runtimeConfigJSON: String,
         createdAt: Date = Date(),
-        routePolicy: TunnelRoutePolicy = .disabled
+        routePolicy: TunnelRoutePolicy = .disabled,
+        remoteGeoAssetSettings: RemoteGeoAssetSettings? = nil
     ) {
         self.sessionID = sessionID
         self.activeTunnelTarget = activeTunnelTarget
@@ -73,6 +75,7 @@ struct TunnelProviderConfigurationEnvelope: Codable, Hashable, Sendable {
         self.createdAt = createdAt
         self.configHash = Self.hash(for: runtimeConfigJSON)
         self.routePolicy = routePolicy
+        self.remoteGeoAssetSettings = remoteGeoAssetSettings
     }
 
     var hasValidHash: Bool {

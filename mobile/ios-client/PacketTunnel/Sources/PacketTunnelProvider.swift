@@ -34,6 +34,7 @@ private struct ProviderSupervisorState {
 final class PacketTunnelProvider: NEPacketTunnelProvider {
     private let logStore = LogStore()
     private let tunnelSessionStore = TunnelSessionStore()
+    private let remoteGeoAssetManager = RemoteGeoAssetManager()
     private let recoveryPolicy = TunnelRecoveryPolicy.default
     private let stateQueue = DispatchQueue(label: "internet.packet-tunnel.state")
     private let healthQueue = DispatchQueue(label: "internet.packet-tunnel.health")
@@ -257,12 +258,28 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         performance.configValidateMs = Self.elapsedMilliseconds(since: validateStartedAt)
 
+        let bundledAssetDirectory = Bundle.main.resourceURL?.path ?? ""
+        let assetDir: String
+        do {
+            assetDir = try RemoteGeoAssetRuntimePreparation.assetDirectory(
+                settings: providerConfiguration.remoteGeoAssetSettings,
+                manager: remoteGeoAssetManager,
+                bundledAssetDirectory: bundledAssetDirectory
+            )
+        } catch {
+            throw LocalRuntimeStartFailure(
+                reason: .xrayStartFailed,
+                message: error.localizedDescription,
+                performance: performance
+            )
+        }
+
         let engineStartedAt = DispatchTime.now()
         do {
             try bridge.start(
                 configJSON: providerConfiguration.runtimeConfigJSON,
                 tunFD: -1,
-                assetDir: Bundle.main.resourceURL?.path ?? ""
+                assetDir: assetDir
             )
         } catch {
             performance.xrayEngineStartMs = Self.elapsedMilliseconds(since: engineStartedAt)

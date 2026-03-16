@@ -50,6 +50,8 @@ enum AppConfiguration {
     static let latencyCacheKey = "profile_latency_cache"
     static let tunnelRuntimeStateKey = "tunnel_runtime_state"
     static let latestBenchmarkResultKey = "latest_benchmark_result"
+    static let remoteGeoAssetSettingsKey = "remote_geo_asset_settings"
+    static let remoteGeoAssetRefreshStateKey = "remote_geo_asset_refresh_state"
     static let tunnelRuntimeStateFileName = "tunnel_runtime_state.json"
     static let tunnelProviderConfigurationAppGroupKey = "AppGroupIdentifier"
     static let tunnelProviderConfigurationVersionKey = "ConfigurationVersion"
@@ -73,4 +75,7 @@ enum AppConfiguration {
     static let benchmarkRequestTimeout: TimeInterval = 15
     static let xrayLogFileName = "xray.log"
     static let eventsLogFileName = "client-events.log"
+    static let remoteGeoAssetRefreshInterval: TimeInterval = 24 * 60 * 60
+    static let geoIPAssetFileName = "geoip.dat"
+    static let geoSiteAssetFileName = "geosite.dat"
 }

@@ -553,6 +553,43 @@ private struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section {
+                    TextField("GeoIP URL", text: $model.remoteGeoAssetSettings.geoIPURLString)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                        .textContentType(.URL)
+                    TextField("GeoSite URL", text: $model.remoteGeoAssetSettings.geoSiteURLString)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                        .textContentType(.URL)
+
+                    Button("Save Settings") {
+                        model.saveRemoteGeoAssetSettings()
+                    }
+
+                    Button {
+                        Task {
+                            await model.refreshRemoteGeoAssets(force: true)
+                        }
+                    } label: {
+                        if model.isRefreshingRemoteGeoAssets {
+                            Label("Refreshing...", systemImage: "arrow.trianglehead.2.clockwise.rotate.90")
+                        } else {
+                            Label("Refresh Now", systemImage: "arrow.clockwise")
+                        }
+                    }
+                    .disabled(model.isRefreshingRemoteGeoAssets || !model.remoteGeoAssetSettings.hasAnyConfiguredAssets)
+
+                    geoAssetStatusView(kind: .geoIP, status: model.remoteGeoAssetRefreshState.geoIP)
+                    geoAssetStatusView(kind: .geoSite, status: model.remoteGeoAssetRefreshState.geoSite)
+                } header: {
+                    Text("Geo Assets")
+                } footer: {
+                    Text("Remote geo assets are optional. Saving only updates shared settings. Tunnel reconnect is still manual.")
+                }
+
                 Section("Diagnostics") {
                     Button {
                         Task {
@@ -627,6 +664,32 @@ private struct SettingsView: View {
             .navigationTitle("Settings")
         }
     }
+
+    @ViewBuilder
+    private func geoAssetStatusView(
+        kind: RemoteGeoAssetKind,
+        status: RemoteGeoAssetStatus
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(kind.displayName)
+                .font(.subheadline.weight(.semibold))
+            if let lastSuccessfulRefreshAt = status.lastSuccessfulRefreshAt {
+                Text("Last refresh \(geoAssetDateFormatter.string(from: lastSuccessfulRefreshAt))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Last refresh: never")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let lastError = status.lastError, !lastError.isEmpty {
+                Text(lastError)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
 }
 
 private func benchmarkMetric(_ value: Int?) -> String {
@@ -635,6 +698,13 @@ private func benchmarkMetric(_ value: Int?) -> String {
     }
     return "\(value)ms"
 }
+
+private let geoAssetDateFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateStyle = .medium
+    formatter.timeStyle = .short
+    return formatter
+}()
 
 private struct ManualProfileEditorView: View {
     @Environment(\.dismiss) private var dismiss

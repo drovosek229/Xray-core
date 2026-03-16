@@ -20,6 +20,9 @@ final class AppModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var logLines: [String] = []
     @Published var latestBenchmarkResult: TunnelBenchmarkResult?
+    @Published var remoteGeoAssetSettings = RemoteGeoAssetSettings()
+    @Published var remoteGeoAssetRefreshState = RemoteGeoAssetRefreshState()
+    @Published var isRefreshingRemoteGeoAssets = false
 
     private let repository: ProfileRepository
     private let logStore: LogStore
@@ -28,6 +31,7 @@ final class AppModel: ObservableObject {
     private let latencyStore: ProfileLatencyStore
     private let tunnelSessionStore: TunnelSessionStore
     private let benchmarkStore: BenchmarkStore
+    private let remoteGeoAssetManager: RemoteGeoAssetManager
     private lazy var subscriptionSyncController = SubscriptionSyncController(
         repository: repository,
         logStore: logStore
@@ -40,7 +44,8 @@ final class AppModel: ObservableObject {
         preferencesStore: ClientPreferencesStore = ClientPreferencesStore(),
         latencyStore: ProfileLatencyStore = ProfileLatencyStore(),
         tunnelSessionStore: TunnelSessionStore = TunnelSessionStore(),
-        benchmarkStore: BenchmarkStore = BenchmarkStore()
+        benchmarkStore: BenchmarkStore = BenchmarkStore(),
+        remoteGeoAssetManager: RemoteGeoAssetManager = RemoteGeoAssetManager()
     ) {
         self.repository = repository
         self.logStore = logStore
@@ -49,6 +54,7 @@ final class AppModel: ObservableObject {
         self.latencyStore = latencyStore
         self.tunnelSessionStore = tunnelSessionStore
         self.benchmarkStore = benchmarkStore
+        self.remoteGeoAssetManager = remoteGeoAssetManager
         self.tunnelManager.onStatusChange = { [weak self] status, connectedDate in
             Task { @MainActor in
                 await self?.handleTunnelStatusChange(status, connectedDate: connectedDate)
@@ -66,6 +72,8 @@ final class AppModel: ObservableObject {
             latencyRecords = try latencyStore.loadRecords()
             tunnelRuntimeState = try tunnelSessionStore.loadRuntimeState()
             latestBenchmarkResult = try benchmarkStore.loadLatestResult()
+            remoteGeoAssetSettings = try preferencesStore.loadRemoteGeoAssetSettings()
+            remoteGeoAssetRefreshState = try remoteGeoAssetManager.loadRefreshState()
 
             try reconcileActiveTunnelTarget()
             let snapshot = try await tunnelManager.loadOrCreateManager()
@@ -245,7 +253,8 @@ final class AppModel: ObservableObject {
                 activeTunnelTarget: activeTunnelTarget,
                 targetName: profileLabel(for: resolvedProfile),
                 runtimeConfigJSON: configJSON,
-                routePolicy: .disabled
+                routePolicy: .disabled,
+                remoteGeoAssetSettings: remoteGeoAssetSettingsSnapshot()
             )
             do {
                 let snapshot = try await performConnectAttempt(
@@ -270,7 +279,8 @@ final class AppModel: ObservableObject {
                     activeTunnelTarget: activeTunnelTarget,
                     targetName: providerConfiguration.targetName,
                     runtimeConfigJSON: configJSON,
-                    routePolicy: .disabled
+                    routePolicy: .disabled,
+                    remoteGeoAssetSettings: remoteGeoAssetSettingsSnapshot()
                 )
                 let snapshot = try await performConnectAttempt(
                     providerConfiguration: retryConfiguration,
@@ -330,6 +340,36 @@ final class AppModel: ObservableObject {
             }
             appendLog("Requested VPN disconnect")
         } catch {
+            setError(error)
+        }
+    }
+
+    func saveRemoteGeoAssetSettings() {
+        do {
+            remoteGeoAssetSettings = RemoteGeoAssetSettings(
+                geoIPURLString: remoteGeoAssetSettings.geoIPURLString.trimmingCharacters(in: .whitespacesAndNewlines),
+                geoSiteURLString: remoteGeoAssetSettings.geoSiteURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+            try preferencesStore.saveRemoteGeoAssetSettings(remoteGeoAssetSettings)
+            appendLog("Saved remote geo asset settings")
+        } catch {
+            setError(error)
+        }
+    }
+
+    func refreshRemoteGeoAssets(force: Bool = true) async {
+        isRefreshingRemoteGeoAssets = true
+        defer { isRefreshingRemoteGeoAssets = false }
+
+        do {
+            remoteGeoAssetRefreshState = try await remoteGeoAssetManager.refreshIfNeeded(
+                settings: remoteGeoAssetSettings,
+                force: force
+            )
+            appendLog("Refreshed remote geo assets")
+        } catch {
+            remoteGeoAssetRefreshState =
+                (try? remoteGeoAssetManager.loadRefreshState()) ?? remoteGeoAssetRefreshState
             setError(error)
         }
     }
@@ -800,6 +840,10 @@ final class AppModel: ObservableObject {
             return "n/a"
         }
         return "\(value)ms"
+    }
+
+    private func remoteGeoAssetSettingsSnapshot() -> RemoteGeoAssetSettings? {
+        remoteGeoAssetSettings.hasAnyConfiguredAssets ? remoteGeoAssetSettings : nil
     }
 
     private static func elapsedMilliseconds(since start: DispatchTime) -> Int {

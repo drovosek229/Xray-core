@@ -1,5 +1,3 @@
-#include? "Local.xcconfig"
-
 DEVELOPMENT_TEAM = $(DEVELOPMENT_TEAM_ID)
 
 APP_DISPLAY_NAME = internet
@@ -11,3 +9,5 @@ PACKET_TUNNEL_BUNDLE_IDENTIFIER = com.example.internet.PacketTunnel
 APP_GROUP_IDENTIFIER = group.com.example.internet
 SHARED_KEYCHAIN_SERVICE = com.example.internet
 SHARED_KEYCHAIN_SUFFIX = com.example.internet.shared
+
+#include? "Local.xcconfig"

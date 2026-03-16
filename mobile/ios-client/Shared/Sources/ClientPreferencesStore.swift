@@ -37,4 +37,12 @@ final class ClientPreferencesStore {
         try appGroupStore.save(Array(values).sorted(), forKey: AppConfiguration.collapsedSectionIDsKey)
     }
 
+    func loadRemoteGeoAssetSettings() throws -> RemoteGeoAssetSettings {
+        try appGroupStore.load(RemoteGeoAssetSettings.self, forKey: AppConfiguration.remoteGeoAssetSettingsKey)
+            ?? RemoteGeoAssetSettings()
+    }
+
+    func saveRemoteGeoAssetSettings(_ value: RemoteGeoAssetSettings) throws {
+        try appGroupStore.save(value, forKey: AppConfiguration.remoteGeoAssetSettingsKey)
+    }
 }

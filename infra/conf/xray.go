@@ -345,6 +345,7 @@ type Config struct {
 	Transport map[string]json.RawMessage `json:"transport"`
 
 	LogConfig        *LogConfig              `json:"log"`
+	GeoAssets        *GeoAssetsConfig        `json:"geoAssets"`
 	RouterConfig     *RouterConfig           `json:"routing"`
 	DNSConfig        *DNSConfig              `json:"dns"`
 	InboundConfigs   []InboundDetourConfig   `json:"inbounds"`
@@ -388,6 +389,9 @@ func (c *Config) Override(o *Config, fn string) {
 
 	if o.LogConfig != nil {
 		c.LogConfig = o.LogConfig
+	}
+	if o.GeoAssets != nil {
+		c.GeoAssets = o.GeoAssets
 	}
 	if o.RouterConfig != nil {
 		c.RouterConfig = o.RouterConfig
@@ -474,6 +478,11 @@ func (c *Config) Build() (*core.Config, error) {
 		return nil, errors.New("failed to post-process configuration file").Base(err)
 	}
 
+	geoAssetResolver, err := c.prepareGeoAssetResolver()
+	if err != nil {
+		return nil, errors.New("failed to prepare remote geo assets").Base(err)
+	}
+
 	config := &core.Config{
 		App: []*serial.TypedMessage{
 			serial.ToTypedMessage(&dispatcher.Config{}),
@@ -515,7 +524,7 @@ func (c *Config) Build() (*core.Config, error) {
 	config.App = append([]*serial.TypedMessage{logConfMsg}, config.App...)
 
 	if c.RouterConfig != nil {
-		routerConfig, err := c.RouterConfig.Build()
+		routerConfig, err := c.RouterConfig.buildWithAssetResolver(geoAssetResolver)
 		if err != nil {
 			return nil, errors.New("failed to build routing configuration").Base(err)
 		}
@@ -523,7 +532,7 @@ func (c *Config) Build() (*core.Config, error) {
 	}
 
 	if c.DNSConfig != nil {
-		dnsApp, err := c.DNSConfig.Build()
+		dnsApp, err := c.DNSConfig.buildWithAssetResolver(geoAssetResolver)
 		if err != nil {
 			return nil, errors.New("failed to build DNS configuration").Base(err)
 		}
@@ -614,6 +623,11 @@ func (c *Config) Build() (*core.Config, error) {
 }
 
 func (c *Config) BuildMPHCache(customMatcherFilePath *string) error {
+	geoAssetResolver, err := c.prepareGeoAssetResolver()
+	if err != nil {
+		return errors.New("failed to prepare remote geo assets").Base(err)
+	}
+
 	var geosite []*router.GeoSite
 	deps := make(map[string][]string)
 	uniqueGeosites := make(map[string]bool)
@@ -637,7 +651,7 @@ func (c *Config) BuildMPHCache(customMatcherFilePath *string) error {
 		key := strings.ToLower(dStr)
 		country := strings.ToUpper(dStr[len(prefix):])
 		if !uniqueGeosites[country] {
-			ds, err := loadGeositeWithAttr("geosite.dat", country)
+			ds, err := loadGeositeWithAttrWithAssetResolver("geosite.dat", country, geoAssetResolver)
 			if err == nil {
 				uniqueGeosites[country] = true
 				geosite = append(geosite, &router.GeoSite{CountryCode: key, Domain: ds})
@@ -653,7 +667,7 @@ func (c *Config) BuildMPHCache(customMatcherFilePath *string) error {
 			if processGeosite(dStr) {
 				dDeps = append(dDeps, strings.ToLower(dStr))
 			} else {
-				ds, err := parseDomainRule(dStr)
+				ds, err := parseDomainRuleWithAssetResolver(dStr, geoAssetResolver)
 				if err == nil {
 					manualDomains = append(manualDomains, ds...)
 				}
@@ -743,7 +757,7 @@ func (c *Config) BuildMPHCache(customMatcherFilePath *string) error {
 				// build manual domains by their destination IPs
 				sort.Strings(ips)
 				ipKey := strings.Join(ips, ",")
-				ds, err := parseDomainRule(domain)
+				ds, err := parseDomainRuleWithAssetResolver(domain, geoAssetResolver)
 				if err == nil {
 					manualHostGroups[ipKey] = append(manualHostGroups[ipKey], ds...)
 					manualHostIPs[ipKey] = ips

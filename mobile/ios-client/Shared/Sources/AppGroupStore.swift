@@ -38,4 +38,8 @@ final class AppGroupStore {
     func fileURL(named fileName: String) -> URL {
         containerURL.appendingPathComponent(fileName)
     }
+
+    func directoryURL() -> URL {
+        containerURL
+    }
 }
