@@ -1,3 +1,3 @@
 - Add a second XHTTP benchmark around packet-up request shaping (`FillPacketRequest`, `ApplyMetaToRequest`, xpadding placement) so optimization work can move beyond XMUX selection without overfitting the current XMUX microbenchmark.
 - Add explicit lazy-XMUX correctness tests for off-cursor request-limit and reusable-deadline expiry cases, now that off-cursor closed-client cleanup is covered.
-- Profile the post-timer/post-warm-target XMUX fast path before touching it again; the remaining cost is concentrated in mutex lock/unlock, `pickAvailableClientLocked`, `isUsableClientLocked`, and `scheduleWarmRefillLocked` rather than clock polling.
+- Profile the post-timer/post-warm-target/post-usability-specialization XMUX fast path before touching it again; the remaining cost is concentrated in mutex lock/unlock, `pickAvailableClientLocked`, and `scheduleWarmRefillLocked` rather than clock polling or unconditional request-limit checks.

@@ -296,10 +296,16 @@ func (m *XmuxManager) removeUnusableClientsLocked(ctx context.Context) {
 }
 
 func (m *XmuxManager) isUsableClientLocked(xmuxClient *XmuxClient, now time.Time) bool {
-	return !xmuxClient.XmuxConn.IsClosed() &&
-		xmuxClient.leftUsage != 0 &&
-		xmuxClient.LeftRequests.Load() > 0 &&
-		(xmuxClient.UnreusableAt == (time.Time{}) || !now.After(xmuxClient.UnreusableAt))
+	if xmuxClient.XmuxConn.IsClosed() || xmuxClient.leftUsage == 0 {
+		return false
+	}
+	if m.xmuxConfig.HMaxRequestTimes != nil && m.xmuxConfig.HMaxRequestTimes.To > 0 && xmuxClient.LeftRequests.Load() <= 0 {
+		return false
+	}
+	if m.xmuxConfig.HMaxReusableSecs != nil && m.xmuxConfig.HMaxReusableSecs.To > 0 && xmuxClient.UnreusableAt != (time.Time{}) && now.After(xmuxClient.UnreusableAt) {
+		return false
+	}
+	return true
 }
 
 func (m *XmuxManager) warmUsableCountLocked() int {
