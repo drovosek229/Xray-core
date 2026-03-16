@@ -67,6 +67,22 @@ func newHTTPSession(config *Config) *httpSession {
 	return session
 }
 
+func parseRequestRemoteAddr(addr string) (*net.TCPAddr, bool) {
+	host, portText, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, false
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return nil, false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil, false
+	}
+	return &net.TCPAddr{IP: ip, Port: port}, true
+}
+
 func (s *httpSession) touch() {
 	s.lastActivity.Store(time.Now().UnixNano())
 }
@@ -151,24 +167,22 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	}
 
 	h.config.WriteResponseHeader(writer, request.Method, request.Header)
-	length := int(h.config.GetNormalizedXPaddingBytes().rand())
-	config := XPaddingConfig{Length: length}
-
+	validRange := h.config.GetNormalizedXPaddingBytes()
+	paddingMethod := PaddingMethod(h.config.GetNormalizedXPaddingMethod())
+	length := int(validRange.rand())
 	if h.config.XPaddingObfsMode {
-		config.Placement = XPaddingPlacement{
-			Placement: h.config.GetNormalizedXPaddingPlacement(),
-			Key:       h.config.GetNormalizedXPaddingKey(),
-			Header:    h.config.GetNormalizedXPaddingHeader(),
-		}
-		config.Method = PaddingMethod(h.config.GetNormalizedXPaddingMethod())
+		h.config.ApplyXPaddingToResponse(writer, XPaddingConfig{
+			Length: length,
+			Placement: XPaddingPlacement{
+				Placement: h.config.GetNormalizedXPaddingPlacement(),
+				Key:       h.config.GetNormalizedXPaddingKey(),
+				Header:    h.config.GetNormalizedXPaddingHeader(),
+			},
+			Method: paddingMethod,
+		})
 	} else {
-		config.Placement = XPaddingPlacement{
-			Placement: PlacementHeader,
-			Header:    "X-Padding",
-		}
+		writer.Header().Set("X-Padding", GeneratePadding("", length))
 	}
-
-	h.config.ApplyXPaddingToResponse(writer, config)
 
 	if request.Method == "OPTIONS" {
 		writer.WriteHeader(http.StatusOK)
@@ -183,10 +197,9 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 	*/
 
-	validRange := h.config.GetNormalizedXPaddingBytes()
 	paddingValue, paddingPlacement := h.config.ExtractXPaddingFromRequest(request, h.config.XPaddingObfsMode)
 
-	if !h.config.IsPaddingValid(paddingValue, validRange.From, validRange.To, PaddingMethod(h.config.GetNormalizedXPaddingMethod())) {
+	if !h.config.IsPaddingValid(paddingValue, validRange.From, validRange.To, paddingMethod) {
 		errors.LogInfo(context.Background(), "invalid padding ("+paddingPlacement+") length:", int32(len(paddingValue)))
 		writer.WriteHeader(http.StatusBadRequest)
 		return
@@ -213,11 +226,15 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	}
 	var remoteAddr net.Addr
 	var err error
-	remoteAddr, err = net.ResolveTCPAddr("tcp", request.RemoteAddr)
-	if err != nil {
-		remoteAddr = &net.TCPAddr{
-			IP:   []byte{0, 0, 0, 0},
-			Port: 0,
+	if parsedRemoteAddr, ok := parseRequestRemoteAddr(request.RemoteAddr); ok {
+		remoteAddr = parsedRemoteAddr
+	} else {
+		remoteAddr, err = net.ResolveTCPAddr("tcp", request.RemoteAddr)
+		if err != nil {
+			remoteAddr = &net.TCPAddr{
+				IP:   []byte{0, 0, 0, 0},
+				Port: 0,
+			}
 		}
 	}
 	if request.ProtoMajor == 3 {
