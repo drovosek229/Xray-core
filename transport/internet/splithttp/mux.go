@@ -76,9 +76,14 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 }
 
 func (m *XmuxManager) publishXmuxClientsLocked() {
+	if len(m.xmuxClients) == 0 {
+		m.fastXmuxSnapshot.Store(nil)
+		return
+	}
+
 	snapshot := &xmuxClientSnapshot{xmuxClients: append([]*XmuxClient(nil), m.xmuxClients...)}
 	snapshot.clientCount = uint32(len(snapshot.xmuxClients))
-	if snapshot.clientCount > 0 && snapshot.clientCount&(snapshot.clientCount-1) == 0 {
+	if snapshot.clientCount&(snapshot.clientCount-1) == 0 {
 		snapshot.powerOfTwo = true
 		snapshot.indexMask = snapshot.clientCount - 1
 	}
@@ -173,9 +178,6 @@ func (m *XmuxManager) tryGetXmuxClientFast() *XmuxClient {
 	}
 	xmuxClients := snapshot.xmuxClients
 	clientCount := int(snapshot.clientCount)
-	if clientCount == 0 {
-		return nil
-	}
 	if m.connections > 0 && clientCount < int(m.connections) {
 		return nil
 	}
