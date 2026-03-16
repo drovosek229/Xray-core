@@ -393,11 +393,20 @@ func (c *Config) ExtractXPaddingFromRequest(req *http.Request, obfsMode bool) (s
 	return "", ""
 }
 
+func (c *Config) getImplicitDefaultPaddingValidationRange() (int32, int32, bool) {
+	if c == nil || (c.XPaddingBytes != nil && c.XPaddingBytes.To != 0) {
+		return 0, 0, false
+	}
+	return 80, 1000, true
+}
+
 func (c *Config) IsPaddingValid(paddingValue string, from, to int32, method PaddingMethod) bool {
 	if paddingValue == "" {
 		return false
 	}
-	if to <= 0 {
+	if implicitFrom, implicitTo, ok := c.getImplicitDefaultPaddingValidationRange(); ok {
+		from, to = implicitFrom, implicitTo
+	} else if to <= 0 {
 		r := c.GetNormalizedXPaddingBytes()
 		from, to = r.From, r.To
 	}

@@ -117,6 +117,43 @@ func TestGetRequestHeaderWithPayloadLeavesBaseHeadersWhenPayloadKeyUnavailable(t
 	}
 }
 
+func TestLegacyDefaultPaddingValidationAcceptsBalancedClientPadding(t *testing.T) {
+	clientConfig := &Config{
+		BehaviorProfile: BehaviorProfileBalanced,
+		XPaddingBytes:   &RangeConfig{From: 96, To: 96},
+	}
+	request, err := http.NewRequest(http.MethodPut, "https://example.com/test", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientConfig.FillStreamRequest(request, "", "", nil)
+
+	serverConfig := &Config{}
+	validRange := serverConfig.GetNormalizedXPaddingBytes()
+	paddingValue, _ := serverConfig.ExtractXPaddingFromRequest(request, false)
+	if !serverConfig.IsPaddingValid(paddingValue, validRange.From, validRange.To, PaddingMethod(serverConfig.GetNormalizedXPaddingMethod())) {
+		t.Fatalf("expected legacy-default server validation to accept balanced-style padding length %d", len(paddingValue))
+	}
+}
+
+func TestBalancedDefaultPaddingValidationAcceptsLegacyClientPadding(t *testing.T) {
+	clientConfig := &Config{
+		XPaddingBytes: &RangeConfig{From: 900, To: 900},
+	}
+	request, err := http.NewRequest(http.MethodPut, "https://example.com/test", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientConfig.FillStreamRequest(request, "", "", nil)
+
+	serverConfig := &Config{BehaviorProfile: BehaviorProfileBalanced}
+	validRange := serverConfig.GetNormalizedXPaddingBytes()
+	paddingValue, _ := serverConfig.ExtractXPaddingFromRequest(request, false)
+	if !serverConfig.IsPaddingValid(paddingValue, validRange.From, validRange.To, PaddingMethod(serverConfig.GetNormalizedXPaddingMethod())) {
+		t.Fatalf("expected balanced-default server validation to accept legacy-style padding length %d", len(paddingValue))
+	}
+}
+
 func TestApplyMetaToRequestPreservesAndReplacesQueryValues(t *testing.T) {
 	config := &Config{
 		SessionPlacement: PlacementQuery,
