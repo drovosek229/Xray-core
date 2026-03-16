@@ -1,3 +1,3 @@
-- Add a second XHTTP benchmark around packet-up request shaping (`FillPacketRequest`, `ApplyMetaToRequest`, xpadding placement) so optimization work can move beyond XMUX selection without overfitting the current microbenchmark.
-- Add explicit lazy-XMUX correctness tests for off-cursor closed/expired clients to prove bounded cleanup and warm-pool refill behavior before attempting any more aggressive maintenance skipping.
-- Explore whether `removeUnusableClientsLocked` and the refill goroutine can share more bookkeeping with the new `usableCount` field without reintroducing benchmark regressions.
+- Add a second XHTTP benchmark around packet-up request shaping (`FillPacketRequest`, `ApplyMetaToRequest`, xpadding placement) so optimization work can move beyond XMUX selection without overfitting the current XMUX microbenchmark.
+- Add explicit lazy-XMUX correctness tests for off-cursor request-limit and reusable-deadline expiry cases, now that off-cursor closed-client cleanup is covered.
+- Deprioritize further XMUX fast-path clock/branch micro-tuning unless new profiling shows a fresh hotspot: timer-armed sweep gating solved the dominant `time.Now()` cost, and several smaller reshuffles regressed.

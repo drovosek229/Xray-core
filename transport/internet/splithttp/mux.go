@@ -34,7 +34,8 @@ type XmuxManager struct {
 	newConnFunc     func() XmuxConn
 	xmuxClients     []*XmuxClient
 	nextClientIndex int
-	nextSweepAt     time.Time
+	sweepDue        bool
+	sweepScheduled  bool
 	refillScheduled bool
 }
 
@@ -49,6 +50,9 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 	}
 	manager.access.Lock()
 	manager.fillWarmClientsLocked(context.Background())
+	if len(manager.xmuxClients) > 0 {
+		manager.scheduleSweepCheckLocked()
+	}
 	manager.access.Unlock()
 	return manager
 }
@@ -76,13 +80,12 @@ func (m *XmuxManager) newXmuxClient() *XmuxClient {
 func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when locking
 	m.access.Lock()
 
-	now := time.Now()
-	xmuxClient := m.pickXmuxClientLocked(ctx, now)
+	xmuxClient := m.pickXmuxClientLocked(ctx)
 
 	if len(m.xmuxClients) == 0 {
 		errors.LogDebug(ctx, "XMUX: creating xmuxClient because xmuxClients is empty")
 		xmuxClient = m.newXmuxClient()
-		m.nextSweepAt = now.Add(xmuxHealthSweepInterval)
+		m.scheduleSweepCheckLocked()
 		m.scheduleWarmRefillLocked()
 		m.access.Unlock()
 		return xmuxClient
@@ -91,7 +94,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 	if m.connections > 0 && len(m.xmuxClients) < int(m.connections) {
 		errors.LogDebug(ctx, "XMUX: creating xmuxClient because maxConnections was not hit, xmuxClients = ", len(m.xmuxClients))
 		xmuxClient = m.newXmuxClient()
-		m.nextSweepAt = now.Add(xmuxHealthSweepInterval)
+		m.scheduleSweepCheckLocked()
 		m.scheduleWarmRefillLocked()
 		m.access.Unlock()
 		return xmuxClient
@@ -100,7 +103,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 	if xmuxClient == nil {
 		errors.LogDebug(ctx, "XMUX: creating xmuxClient because maxConcurrency was hit, xmuxClients = ", len(m.xmuxClients))
 		xmuxClient = m.newXmuxClient()
-		m.nextSweepAt = now.Add(xmuxHealthSweepInterval)
+		m.scheduleSweepCheckLocked()
 		m.scheduleWarmRefillLocked()
 		m.access.Unlock()
 		return xmuxClient
@@ -117,13 +120,19 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 	return xmuxClient
 }
 
-func (m *XmuxManager) pickXmuxClientLocked(ctx context.Context, now time.Time) *XmuxClient {
-	if m.nextSweepAt.IsZero() || !now.Before(m.nextSweepAt) {
+func (m *XmuxManager) pickXmuxClientLocked(ctx context.Context) *XmuxClient {
+	if m.sweepDue {
+		now := time.Now()
 		xmuxClient := m.sweepAndPickAvailableClientLocked(ctx, now)
-		m.nextSweepAt = now.Add(xmuxHealthSweepInterval)
+		m.sweepDue = false
+		m.scheduleSweepCheckLocked()
 		return xmuxClient
 	}
-	return m.pickAvailableClientLocked(ctx, now)
+
+	if m.xmuxConfig.HMaxReusableSecs != nil && m.xmuxConfig.HMaxReusableSecs.To > 0 {
+		return m.pickAvailableClientLocked(ctx, time.Now())
+	}
+	return m.pickAvailableClientLocked(ctx, time.Time{})
 }
 
 func (m *XmuxManager) sweepAndPickAvailableClientLocked(ctx context.Context, now time.Time) *XmuxClient {
@@ -315,6 +324,20 @@ func (m *XmuxManager) fillWarmClientsLocked(ctx context.Context) {
 		errors.LogDebug(ctx, "XMUX: creating warm xmuxClient, warm target = ", target, ", xmuxClients = ", len(m.xmuxClients))
 		m.newXmuxClient()
 	}
+}
+
+func (m *XmuxManager) scheduleSweepCheckLocked() {
+	if m.sweepDue || m.sweepScheduled {
+		return
+	}
+
+	m.sweepScheduled = true
+	time.AfterFunc(xmuxHealthSweepInterval, func() {
+		m.access.Lock()
+		m.sweepScheduled = false
+		m.sweepDue = true
+		m.access.Unlock()
+	})
 }
 
 func (m *XmuxManager) scheduleWarmRefillLocked() {
