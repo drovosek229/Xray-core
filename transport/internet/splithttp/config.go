@@ -698,7 +698,7 @@ func (c RangeConfig) rand() int32 {
 }
 
 func appendToPath(path, value string) string {
-	if strings.HasSuffix(path, "/") {
+	if len(path) > 0 && path[len(path)-1] == '/' {
 		return path + value
 	}
 	return path + "/" + value
