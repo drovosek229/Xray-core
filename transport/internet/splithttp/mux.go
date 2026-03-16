@@ -210,14 +210,21 @@ func (m *XmuxManager) pickAvailableClientLocked(ctx context.Context, now time.Ti
 			start = 0
 		}
 		xmuxClient := m.xmuxClients[start]
+		openUsage := xmuxClient.OpenUsage.Load()
+		scanned += 1
+		if m.concurrency > 0 && openUsage >= m.concurrency {
+			start += 1
+			continue
+		}
 		if !m.isUsableClientLocked(xmuxClient, now) {
 			errors.LogDebug(ctx, "XMUX: removing xmuxClient, IsClosed() = ", xmuxClient.XmuxConn.IsClosed(),
-				", OpenUsage = ", xmuxClient.OpenUsage.Load(),
+				", OpenUsage = ", openUsage,
 				", leftUsage = ", xmuxClient.leftUsage,
 				", LeftRequests = ", xmuxClient.LeftRequests.Load(),
 				", UnreusableAt = ", xmuxClient.UnreusableAt)
 			m.removeXmuxClientLocked(start)
 			usableCount -= 1
+			scanned -= 1
 			if usableCount == 0 {
 				m.nextClientIndex = 0
 				return nil, 0
@@ -225,12 +232,6 @@ func (m *XmuxManager) pickAvailableClientLocked(ctx context.Context, now time.Ti
 			if start < m.nextClientIndex && m.nextClientIndex > 0 {
 				m.nextClientIndex -= 1
 			}
-			continue
-		}
-
-		scanned += 1
-		if m.concurrency > 0 && xmuxClient.OpenUsage.Load() >= m.concurrency {
-			start += 1
 			continue
 		}
 
