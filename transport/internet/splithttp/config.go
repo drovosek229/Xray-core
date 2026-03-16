@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unsafe"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/crypto"
@@ -68,7 +69,7 @@ func (c *Config) GetRequestHeaderWithPayload(payload []byte) http.Header {
 	if key == "" {
 		return header
 	}
-	encodedData := base64.RawURLEncoding.EncodeToString(payload)
+	encodedData := encodeRawURLBase64ToString(payload)
 	chunkSizeRange := c.GetNormalizedUplinkChunkSize()
 
 	for i := 0; len(encodedData) > 0; i++ {
@@ -89,7 +90,7 @@ func (c *Config) GetRequestCookiesWithPayload(payload []byte) []*http.Cookie {
 	if key == "" {
 		return cookies
 	}
-	encodedData := base64.RawURLEncoding.EncodeToString(payload)
+	encodedData := encodeRawURLBase64ToString(payload)
 	chunkSizeRange := c.GetNormalizedUplinkChunkSize()
 
 	for i := 0; len(encodedData) > 0; i++ {
@@ -118,6 +119,15 @@ func isCookieToken(name string) bool {
 		}
 	}
 	return true
+}
+
+func encodeRawURLBase64ToString(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	encoded := make([]byte, base64.RawURLEncoding.EncodedLen(len(data)))
+	base64.RawURLEncoding.Encode(encoded, data)
+	return unsafe.String(unsafe.SliceData(encoded), len(encoded))
 }
 
 func readRequestBody(body io.Reader, contentLength int64) ([]byte, error) {
@@ -480,7 +490,7 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 		case PlacementHeader:
 			request.Header = c.GetRequestHeaderForBehavior(behavior)
 			if key := c.GetNormalizedUplinkDataKey(); key != "" {
-				encodedData := base64.RawURLEncoding.EncodeToString(data)
+				encodedData := encodeRawURLBase64ToString(data)
 				chunkSizeRange := c.GetNormalizedUplinkChunkSize()
 				for i := 0; len(encodedData) > 0; i++ {
 					chunkSize := min(int(chunkSizeRange.rand()), len(encodedData))
@@ -492,7 +502,7 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 		case PlacementCookie:
 			request.Header = c.GetRequestHeaderForBehavior(behavior)
 			if key := c.GetNormalizedUplinkDataKey(); key != "" {
-				encodedData := base64.RawURLEncoding.EncodeToString(data)
+				encodedData := encodeRawURLBase64ToString(data)
 				chunkSizeRange := c.GetNormalizedUplinkChunkSize()
 				if isCookieToken(key) {
 					var builder strings.Builder
