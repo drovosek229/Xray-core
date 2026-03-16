@@ -75,7 +75,6 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 	defer m.access.Unlock()
 
 	xmuxClient, usableCount := m.sweepAndPickAvailableClientLocked(ctx)
-	m.scheduleWarmRefillLocked(usableCount)
 
 	if len(m.xmuxClients) == 0 {
 		errors.LogDebug(ctx, "XMUX: creating xmuxClient because xmuxClients is empty")
