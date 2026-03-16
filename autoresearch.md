@@ -8,7 +8,7 @@ Improve XHTTP (`transport/internet/splithttp`) with a focus on XMUX hot-path eff
 - **Secondary**: `bytes_sum`, `allocs_sum`
 
 ## How to Run
-`./autoresearch.sh` — runs the XHTTP XMUX microbenchmarks in `golang:1.26` and prints `METRIC name=value` lines.
+`./autoresearch.sh` — runs the XHTTP XMUX microbenchmarks in `golang:1.26` and prints `METRIC name=value` lines. The workload now covers both power-of-two and non-power-of-two warm/concurrency XMUX pools to reduce overfitting to one pool shape.
 
 ## Files in Scope
 - `transport/internet/splithttp/mux.go` — XMUX client pool selection and warm-connection behavior.

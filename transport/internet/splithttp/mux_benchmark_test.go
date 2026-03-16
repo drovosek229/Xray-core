@@ -54,3 +54,44 @@ func BenchmarkXmuxManagerGetXmuxClientWithConcurrencyFilter(b *testing.B) {
 		_ = manager.GetXmuxClient(ctx)
 	}
 }
+
+func BenchmarkXmuxManagerGetXmuxClientWarmPoolNonPowerOfTwo(b *testing.B) {
+	ctx := context.Background()
+	manager := NewXmuxManager(XmuxConfig{
+		MaxConnections:  &RangeConfig{From: 12, To: 12},
+		WarmConnections: 12,
+	}, func() XmuxConn {
+		return benchmarkXmuxConn{}
+	})
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = manager.GetXmuxClient(ctx)
+	}
+}
+
+func BenchmarkXmuxManagerGetXmuxClientWithConcurrencyFilterNonPowerOfTwo(b *testing.B) {
+	ctx := context.Background()
+	manager := NewXmuxManager(XmuxConfig{
+		MaxConnections:  &RangeConfig{From: 12, To: 12},
+		MaxConcurrency:  &RangeConfig{From: 2, To: 2},
+		WarmConnections: 12,
+	}, func() XmuxConn {
+		return benchmarkXmuxConn{}
+	})
+
+	for i, client := range manager.xmuxClients {
+		if i%2 == 0 {
+			client.OpenUsage.Store(2)
+			continue
+		}
+		client.OpenUsage.Store(1)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = manager.GetXmuxClient(ctx)
+	}
+}
