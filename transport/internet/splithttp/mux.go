@@ -38,21 +38,22 @@ type xmuxClientSnapshot struct {
 }
 
 type XmuxManager struct {
-	access              sync.Mutex
-	xmuxConfig          XmuxConfig
-	concurrency         int32
-	connections         int32
-	warmConnections     int32
-	usableCount         int
-	newConnFunc         func() XmuxConn
-	xmuxClients         []*XmuxClient
-	fastXmuxSnapshot    atomic.Pointer[xmuxClientSnapshot]
-	fastNextClientIndex atomic.Uint32
-	nextClientIndex     int
-	sweepDue            bool
-	sweepDueFlag        atomic.Bool
-	sweepScheduled      bool
-	refillScheduled     bool
+	access                           sync.Mutex
+	xmuxConfig                       XmuxConfig
+	concurrency                      int32
+	connections                      int32
+	warmConnections                  int32
+	usableCount                      int
+	newConnFunc                      func() XmuxConn
+	xmuxClients                      []*XmuxClient
+	fastXmuxSnapshot                 atomic.Pointer[xmuxClientSnapshot]
+	fastXmuxPowerOfTwoClosedSnapshot atomic.Pointer[xmuxClientSnapshot]
+	fastNextClientIndex              atomic.Uint32
+	nextClientIndex                  int
+	sweepDue                         bool
+	sweepDueFlag                     atomic.Bool
+	sweepScheduled                   bool
+	refillScheduled                  bool
 }
 
 func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxManager {
@@ -82,6 +83,8 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 }
 
 func (m *XmuxManager) publishXmuxClientsLocked() {
+	m.fastXmuxPowerOfTwoClosedSnapshot.Store(nil)
+
 	clientCount := len(m.xmuxClients)
 	if clientCount == 0 {
 		m.fastXmuxSnapshot.Store(nil)
@@ -120,6 +123,9 @@ func (m *XmuxManager) publishXmuxClientsLocked() {
 		}
 	}
 	m.fastXmuxSnapshot.Store(snapshot)
+	if snapshot.powerOfTwo && snapshot.allClosedFlags {
+		m.fastXmuxPowerOfTwoClosedSnapshot.Store(snapshot)
+	}
 }
 
 func (m *XmuxManager) newXmuxClient() *XmuxClient {
@@ -199,6 +205,33 @@ func (m *XmuxManager) tryGetXmuxClientFast() *XmuxClient {
 		return nil
 	}
 
+	if snapshot := m.fastXmuxPowerOfTwoClosedSnapshot.Load(); snapshot != nil {
+		xmuxClients := snapshot.xmuxClients
+		nextIndex := m.fastNextClientIndex.Add(1) - 1
+		start := int(nextIndex & snapshot.indexMask)
+		if m.concurrency <= 0 {
+			xmuxClient := xmuxClients[start]
+			if xmuxClient.closedFlag.Load() {
+				return nil
+			}
+			return xmuxClient
+		}
+		mask := int(snapshot.indexMask)
+		index := int(nextIndex) & mask
+		for scanned := uint32(0); scanned < snapshot.clientCount; scanned++ {
+			xmuxClient := xmuxClients[index]
+			if xmuxClient.OpenUsage.Load() >= m.concurrency {
+				index = (index + 1) & mask
+				continue
+			}
+			if xmuxClient.closedFlag.Load() {
+				return nil
+			}
+			return xmuxClient
+		}
+		return nil
+	}
+
 	snapshot := m.fastXmuxSnapshot.Load()
 	if snapshot == nil {
 		return nil
@@ -208,31 +241,6 @@ func (m *XmuxManager) tryGetXmuxClientFast() *XmuxClient {
 
 	nextIndex := m.fastNextClientIndex.Add(1) - 1
 	if snapshot.allClosedFlags {
-		if snapshot.powerOfTwo {
-			start := int(nextIndex & snapshot.indexMask)
-			if m.concurrency <= 0 {
-				xmuxClient := xmuxClients[start]
-				if xmuxClient.closedFlag.Load() {
-					return nil
-				}
-				return xmuxClient
-			}
-			mask := int(snapshot.indexMask)
-			index := int(nextIndex) & mask
-			for scanned := uint32(0); scanned < snapshot.clientCount; scanned++ {
-				xmuxClient := xmuxClients[index]
-				if xmuxClient.OpenUsage.Load() >= m.concurrency {
-					index = (index + 1) & mask
-					continue
-				}
-				if xmuxClient.closedFlag.Load() {
-					return nil
-				}
-				return xmuxClient
-			}
-			return nil
-		}
-
 		start := int(nextIndex % snapshot.clientCount)
 		if m.concurrency <= 0 {
 			for scanned := 0; scanned < clientCount; scanned++ {
