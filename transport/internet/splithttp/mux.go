@@ -25,18 +25,21 @@ type XmuxClient struct {
 }
 
 type XmuxManager struct {
-	access          sync.Mutex
-	xmuxConfig      XmuxConfig
-	concurrency     int32
-	connections     int32
-	warmConnections int32
-	usableCount     int
-	newConnFunc     func() XmuxConn
-	xmuxClients     []*XmuxClient
-	nextClientIndex int
-	sweepDue        bool
-	sweepScheduled  bool
-	refillScheduled bool
+	access              sync.Mutex
+	xmuxConfig          XmuxConfig
+	concurrency         int32
+	connections         int32
+	warmConnections     int32
+	usableCount         int
+	newConnFunc         func() XmuxConn
+	xmuxClients         []*XmuxClient
+	fastXmuxClients     atomic.Value
+	fastNextClientIndex atomic.Uint64
+	nextClientIndex     int
+	sweepDue            bool
+	sweepDueFlag        atomic.Bool
+	sweepScheduled      bool
+	refillScheduled     bool
 }
 
 func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxManager {
@@ -57,11 +60,17 @@ func NewXmuxManager(xmuxConfig XmuxConfig, newConnFunc func() XmuxConn) *XmuxMan
 	}
 	manager.access.Lock()
 	manager.fillWarmClientsLocked(context.Background())
+	manager.publishXmuxClientsLocked()
 	if len(manager.xmuxClients) > 0 {
 		manager.scheduleSweepCheckLocked()
 	}
 	manager.access.Unlock()
 	return manager
+}
+
+func (m *XmuxManager) publishXmuxClientsLocked() {
+	snapshot := append([]*XmuxClient(nil), m.xmuxClients...)
+	m.fastXmuxClients.Store(snapshot)
 }
 
 func (m *XmuxManager) newXmuxClient() *XmuxClient {
@@ -81,10 +90,15 @@ func (m *XmuxManager) newXmuxClient() *XmuxClient {
 	}
 	m.xmuxClients = append(m.xmuxClients, xmuxClient)
 	m.usableCount += 1
+	m.publishXmuxClientsLocked()
 	return xmuxClient
 }
 
 func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when locking
+	if xmuxClient := m.tryGetXmuxClientFast(); xmuxClient != nil {
+		return xmuxClient
+	}
+
 	m.access.Lock()
 
 	xmuxClient := m.pickXmuxClientLocked(ctx)
@@ -127,11 +141,72 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 	return xmuxClient
 }
 
+func (m *XmuxManager) tryGetXmuxClientFast() *XmuxClient {
+	if m.sweepDueFlag.Load() {
+		return nil
+	}
+	if m.xmuxConfig.HMaxReusableSecs != nil && m.xmuxConfig.HMaxReusableSecs.To > 0 {
+		return nil
+	}
+	if m.xmuxConfig.HMaxRequestTimes != nil && m.xmuxConfig.HMaxRequestTimes.To > 0 {
+		return nil
+	}
+	if m.xmuxConfig.CMaxReuseTimes != nil && m.xmuxConfig.CMaxReuseTimes.To > 0 {
+		return nil
+	}
+
+	xmuxClientsAny := m.fastXmuxClients.Load()
+	if xmuxClientsAny == nil {
+		return nil
+	}
+	xmuxClients := xmuxClientsAny.([]*XmuxClient)
+	clientCount := len(xmuxClients)
+	if clientCount == 0 {
+		return nil
+	}
+	if m.connections > 0 && clientCount < int(m.connections) {
+		return nil
+	}
+
+	start := int((m.fastNextClientIndex.Add(1) - 1) % uint64(clientCount))
+	if m.concurrency <= 0 {
+		for scanned := 0; scanned < clientCount; scanned++ {
+			index := start + scanned
+			if index >= clientCount {
+				index -= clientCount
+			}
+			xmuxClient := xmuxClients[index]
+			if xmuxClient.XmuxConn.IsClosed() {
+				return nil
+			}
+			return xmuxClient
+		}
+		return nil
+	}
+
+	for scanned := 0; scanned < clientCount; scanned++ {
+		index := start + scanned
+		if index >= clientCount {
+			index -= clientCount
+		}
+		xmuxClient := xmuxClients[index]
+		if xmuxClient.OpenUsage.Load() >= m.concurrency {
+			continue
+		}
+		if xmuxClient.XmuxConn.IsClosed() {
+			return nil
+		}
+		return xmuxClient
+	}
+	return nil
+}
+
 func (m *XmuxManager) pickXmuxClientLocked(ctx context.Context) *XmuxClient {
 	if m.sweepDue {
 		now := time.Now()
 		xmuxClient := m.sweepAndPickAvailableClientLocked(ctx, now)
 		m.sweepDue = false
+		m.sweepDueFlag.Store(false)
 		m.scheduleSweepCheckLocked()
 		return xmuxClient
 	}
@@ -195,6 +270,7 @@ func (m *XmuxManager) sweepAndPickAvailableClientLocked(ctx context.Context, now
 	clear(m.xmuxClients[len(kept):])
 	m.xmuxClients = kept
 	m.usableCount = usableCount
+	m.publishXmuxClientsLocked()
 	if removedCount > 0 {
 		m.scheduleWarmRefillLocked()
 	}
@@ -544,6 +620,7 @@ func (m *XmuxManager) removeUnusableClientsLocked(ctx context.Context) {
 	clear(m.xmuxClients[len(kept):])
 	m.xmuxClients = kept
 	m.usableCount = usableCount
+	m.publishXmuxClientsLocked()
 }
 
 func (m *XmuxManager) isUsableClientLocked(xmuxClient *XmuxClient, now time.Time) bool {
@@ -588,6 +665,7 @@ func (m *XmuxManager) scheduleSweepCheckLocked() {
 		m.access.Lock()
 		m.sweepScheduled = false
 		m.sweepDue = true
+		m.sweepDueFlag.Store(true)
 		m.access.Unlock()
 	})
 }
