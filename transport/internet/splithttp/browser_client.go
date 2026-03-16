@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
@@ -14,13 +15,14 @@ import (
 // BrowserDialerClient implements splithttp.DialerClient in terms of browser dialer
 type BrowserDialerClient struct {
 	transportConfig *Config
+	closed          atomic.Bool
 }
 
 func (c *BrowserDialerClient) IsClosed() bool {
-	panic("not implemented yet")
+	return c.closed.Load() || !browser_dialer.HasBrowserDialer()
 }
 
-func (c *BrowserDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool) (io.ReadCloser, net.Addr, net.Addr, error) {
+func (c *BrowserDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool, behavior *RequestBehavior) (io.ReadCloser, net.Addr, net.Addr, error) {
 	if body != nil {
 		return nil, nil, nil, errors.New("bidirectional streaming for browser dialer not implemented yet")
 	}
@@ -30,32 +32,35 @@ func (c *BrowserDialerClient) OpenStream(ctx context.Context, url string, sessio
 		return nil, nil, nil, err
 	}
 
-	c.transportConfig.FillStreamRequest(request, sessionId, "")
+	c.transportConfig.FillStreamRequest(request, sessionId, "", behavior)
 
 	conn, err := browser_dialer.DialGet(request.URL.String(), request.Header, request.Cookies())
 	dummyAddr := &net.IPAddr{}
 	if err != nil {
+		c.closed.Store(true)
 		return nil, dummyAddr, dummyAddr, err
 	}
 
 	return websocket.NewConnection(conn, dummyAddr, nil, 0), conn.RemoteAddr(), conn.LocalAddr(), nil
 }
 
-func (c *BrowserDialerClient) PostPacket(ctx context.Context, url string, sessionId string, seqStr string, body io.Reader, contentLength int64) error {
+func (c *BrowserDialerClient) PostPacket(ctx context.Context, url string, sessionId string, seqStr string, body io.Reader, contentLength int64, behavior *RequestBehavior) error {
 	method := c.transportConfig.GetNormalizedUplinkHTTPMethod()
 	request, err := http.NewRequest(method, url, body)
 	if err != nil {
+		c.closed.Store(true)
 		return err
 	}
 
 	request.ContentLength = contentLength
-	err = c.transportConfig.FillPacketRequest(request, sessionId, seqStr)
+	err = c.transportConfig.FillPacketRequest(request, sessionId, seqStr, behavior)
 	if err != nil {
+		c.closed.Store(true)
 		return err
 	}
 
 	var bytes []byte
-	if (request.Body != nil) {
+	if request.Body != nil {
 		bytes, err = io.ReadAll(request.Body)
 		if err != nil {
 			return err
@@ -64,6 +69,7 @@ func (c *BrowserDialerClient) PostPacket(ctx context.Context, url string, sessio
 
 	err = browser_dialer.DialPacket(method, request.URL.String(), request.Header, request.Cookies(), bytes)
 	if err != nil {
+		c.closed.Store(true)
 		return err
 	}
 

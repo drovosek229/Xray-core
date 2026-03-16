@@ -57,7 +57,6 @@ func (c *Config) GetRequestHeader() http.Header {
 	return header
 }
 
-
 func (c *Config) GetRequestHeaderWithPayload(payload []byte) http.Header {
 	header := c.GetRequestHeader()
 
@@ -102,9 +101,9 @@ func (c *Config) WriteResponseHeader(writer http.ResponseWriter, requestMethod s
 	}
 
 	if c.GetNormalizedSessionPlacement() == PlacementCookie ||
-	   c.GetNormalizedSeqPlacement() == PlacementCookie ||
-	   c.XPaddingPlacement == PlacementCookie ||
-	   c.GetNormalizedUplinkDataPlacement() == PlacementCookie {
+		c.GetNormalizedSeqPlacement() == PlacementCookie ||
+		c.XPaddingPlacement == PlacementCookie ||
+		c.GetNormalizedUplinkDataPlacement() == PlacementCookie {
 		writer.Header().Set("Access-Control-Allow-Credentials", "true")
 	}
 
@@ -135,6 +134,12 @@ func (c *Config) GetNormalizedUplinkHTTPMethod() string {
 
 func (c *Config) GetNormalizedScMaxEachPostBytes() RangeConfig {
 	if c.ScMaxEachPostBytes == nil || c.ScMaxEachPostBytes.To == 0 {
+		if c.IsBalancedBehaviorProfile() {
+			return RangeConfig{
+				From: 128 * 1024,
+				To:   512 * 1024,
+			}
+		}
 		return RangeConfig{
 			From: 1000000,
 			To:   1000000,
@@ -146,6 +151,12 @@ func (c *Config) GetNormalizedScMaxEachPostBytes() RangeConfig {
 
 func (c *Config) GetNormalizedScMinPostsIntervalMs() RangeConfig {
 	if c.ScMinPostsIntervalMs == nil || c.ScMinPostsIntervalMs.To == 0 {
+		if c.IsBalancedBehaviorProfile() {
+			return RangeConfig{
+				From: 20,
+				To:   90,
+			}
+		}
 		return RangeConfig{
 			From: 30,
 			To:   30,
@@ -294,41 +305,29 @@ func (c *Config) ApplyMetaToRequest(req *http.Request, sessionId string, seqStr 
 	}
 }
 
-func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqStr string) {
-	request.Header = c.GetRequestHeader()
-	length := int(c.GetNormalizedXPaddingBytes().rand())
-	config := XPaddingConfig{Length: length}
-
-	if c.XPaddingObfsMode {
-		config.Placement = XPaddingPlacement{
-			Placement: c.XPaddingPlacement,
-			Key:       c.XPaddingKey,
-			Header:    c.XPaddingHeader,
-			RawURL:    request.URL.String(),
-		}
-		config.Method = PaddingMethod(c.XPaddingMethod)
-	} else {
-		config.Placement = XPaddingPlacement{
-			Placement: PlacementQueryInHeader,
-			Key:       "x_padding",
-			Header:    "Referer",
-			RawURL:    request.URL.String(),
-		}
-	}
-
-	c.ApplyXPaddingToRequest(request, config)
+func (c *Config) FillStreamRequest(request *http.Request, sessionId string, seqStr string, behavior *RequestBehavior) {
+	request.Header = c.GetRequestHeaderForBehavior(behavior)
+	c.ApplyXPaddingToRequest(request, c.GetRequestPaddingConfig(request.URL.String(), behavior))
 	c.ApplyMetaToRequest(request, sessionId, "")
 
-	if request.Body != nil && !c.NoGRPCHeader { // stream-up/one
-		request.Header.Set("Content-Type", "application/grpc")
+	if request.Body != nil && request.Header.Get("Content-Type") == "" {
+		if !c.IsBalancedBehaviorProfile() {
+			if !c.NoGRPCHeader {
+				request.Header.Set("Content-Type", "application/grpc")
+			}
+		} else if contentType := behavior.UploadContentType(); contentType != "" {
+			if contentType != "application/grpc" || !c.NoGRPCHeader {
+				request.Header.Set("Content-Type", contentType)
+			}
+		}
 	}
 }
 
-func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqStr string) error {
+func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqStr string, behavior *RequestBehavior) error {
 	dataPlacement := c.GetNormalizedUplinkDataPlacement()
 
 	if dataPlacement == PlacementBody || dataPlacement == PlacementAuto {
-		request.Header = c.GetRequestHeader()
+		request.Header = c.GetRequestHeaderForBehavior(behavior)
 	} else {
 		var data []byte
 		var err error
@@ -342,36 +341,33 @@ func (c *Config) FillPacketRequest(request *http.Request, sessionId string, seqS
 		request.ContentLength = 0
 		switch dataPlacement {
 		case PlacementHeader:
-			request.Header = c.GetRequestHeaderWithPayload(data)
+			request.Header = c.GetRequestHeaderForBehavior(behavior)
+			for key, values := range c.GetRequestHeaderWithPayload(data) {
+				if len(values) == 0 {
+					continue
+				}
+				request.Header.Del(key)
+				for _, value := range values {
+					request.Header.Add(key, value)
+				}
+			}
 		case PlacementCookie:
-			request.Header = c.GetRequestHeader()
+			request.Header = c.GetRequestHeaderForBehavior(behavior)
 			for _, cookie := range c.GetRequestCookiesWithPayload(data) {
 				request.AddCookie(cookie)
 			}
 		}
 	}
 
-	length := int(c.GetNormalizedXPaddingBytes().rand())
-	config := XPaddingConfig{Length: length}
-
-	if c.XPaddingObfsMode {
-		config.Placement = XPaddingPlacement{
-			Placement: c.XPaddingPlacement,
-			Key:       c.XPaddingKey,
-			Header:    c.XPaddingHeader,
-			RawURL:    request.URL.String(),
-		}
-		config.Method = PaddingMethod(c.XPaddingMethod)
-	} else {
-		config.Placement = XPaddingPlacement{
-			Placement: PlacementQueryInHeader,
-			Key:       "x_padding",
-			Header:    "Referer",
-			RawURL:    request.URL.String(),
+	if request.Body != nil && request.Header.Get("Content-Type") == "" && c.IsBalancedBehaviorProfile() {
+		if contentType := behavior.UploadContentType(); contentType != "" {
+			if contentType != "application/grpc" || !c.NoGRPCHeader {
+				request.Header.Set("Content-Type", contentType)
+			}
 		}
 	}
 
-	c.ApplyXPaddingToRequest(request, config)
+	c.ApplyXPaddingToRequest(request, c.GetRequestPaddingConfig(request.URL.String(), behavior))
 	c.ApplyMetaToRequest(request, sessionId, seqStr)
 
 	return nil

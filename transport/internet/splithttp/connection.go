@@ -3,6 +3,7 @@ package splithttp
 import (
 	"io"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -12,6 +13,9 @@ type splitConn struct {
 	remoteAddr net.Addr
 	localAddr  net.Addr
 	onClose    func()
+	deadlineMu sync.Mutex
+	readTimer  *time.Timer
+	writeTimer *time.Timer
 }
 
 func (c *splitConn) Write(b []byte) (int, error) {
@@ -23,6 +27,7 @@ func (c *splitConn) Read(b []byte) (int, error) {
 }
 
 func (c *splitConn) Close() error {
+	c.stopDeadlineTimers()
 	if c.onClose != nil {
 		c.onClose()
 	}
@@ -49,16 +54,68 @@ func (c *splitConn) RemoteAddr() net.Addr {
 }
 
 func (c *splitConn) SetDeadline(t time.Time) error {
-	// TODO cannot do anything useful
-	return nil
+	if err := c.SetReadDeadline(t); err != nil {
+		return err
+	}
+	return c.SetWriteDeadline(t)
 }
 
 func (c *splitConn) SetReadDeadline(t time.Time) error {
-	// TODO cannot do anything useful
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+
+	if c.readTimer != nil {
+		c.readTimer.Stop()
+		c.readTimer = nil
+	}
+	if t.IsZero() {
+		return nil
+	}
+
+	delay := time.Until(t)
+	if delay <= 0 {
+		return c.reader.Close()
+	}
+
+	c.readTimer = time.AfterFunc(delay, func() {
+		c.reader.Close()
+	})
 	return nil
 }
 
 func (c *splitConn) SetWriteDeadline(t time.Time) error {
-	// TODO cannot do anything useful
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+
+	if c.writeTimer != nil {
+		c.writeTimer.Stop()
+		c.writeTimer = nil
+	}
+	if t.IsZero() {
+		return nil
+	}
+
+	delay := time.Until(t)
+	if delay <= 0 {
+		return c.writer.Close()
+	}
+
+	c.writeTimer = time.AfterFunc(delay, func() {
+		c.writer.Close()
+	})
 	return nil
+}
+
+func (c *splitConn) stopDeadlineTimers() {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+
+	if c.readTimer != nil {
+		c.readTimer.Stop()
+		c.readTimer = nil
+	}
+	if c.writeTimer != nil {
+		c.writeTimer.Stop()
+		c.writeTimer = nil
+	}
 }

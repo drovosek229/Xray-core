@@ -178,6 +178,12 @@ func ApplyPaddingToQuery(u *url.URL, key, value string) {
 
 func (c *Config) GetNormalizedXPaddingBytes() RangeConfig {
 	if c.XPaddingBytes == nil || c.XPaddingBytes.To == 0 {
+		if c.IsBalancedBehaviorProfile() {
+			return RangeConfig{
+				From: 80,
+				To:   640,
+			}
+		}
 		return RangeConfig{
 			From: 100,
 			To:   1000,
