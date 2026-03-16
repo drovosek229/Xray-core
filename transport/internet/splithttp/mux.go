@@ -137,9 +137,15 @@ func (m *XmuxManager) pickXmuxClientLocked(ctx context.Context) *XmuxClient {
 	}
 
 	if m.xmuxConfig.HMaxReusableSecs != nil && m.xmuxConfig.HMaxReusableSecs.To > 0 {
-		return m.pickAvailableClientLocked(ctx, time.Now())
+		return m.pickAvailableClientWithDeadlineLocked(ctx, time.Now())
 	}
-	return m.pickAvailableClientLocked(ctx, time.Time{})
+	if m.xmuxConfig.HMaxRequestTimes == nil || m.xmuxConfig.HMaxRequestTimes.To <= 0 {
+		if m.concurrency <= 0 {
+			return m.pickAvailableClientWithoutDeadlineOrConcurrencyLocked(ctx)
+		}
+		return m.pickAvailableClientWithoutDeadlineLocked(ctx)
+	}
+	return m.pickAvailableClientWithDeadlineLocked(ctx, time.Time{})
 }
 
 func (m *XmuxManager) sweepAndPickAvailableClientLocked(ctx context.Context, now time.Time) *XmuxClient {
@@ -210,16 +216,6 @@ func (m *XmuxManager) removeXmuxClientLocked(index int) {
 	if m.usableCount > 0 {
 		m.usableCount -= 1
 	}
-}
-
-func (m *XmuxManager) pickAvailableClientLocked(ctx context.Context, now time.Time) *XmuxClient {
-	if now.IsZero() && (m.xmuxConfig.HMaxRequestTimes == nil || m.xmuxConfig.HMaxRequestTimes.To <= 0) {
-		if m.concurrency <= 0 {
-			return m.pickAvailableClientWithoutDeadlineOrConcurrencyLocked(ctx)
-		}
-		return m.pickAvailableClientWithoutDeadlineLocked(ctx)
-	}
-	return m.pickAvailableClientWithDeadlineLocked(ctx, now)
 }
 
 func (m *XmuxManager) pickAvailableClientWithoutDeadlineOrConcurrencyLocked(ctx context.Context) *XmuxClient {
