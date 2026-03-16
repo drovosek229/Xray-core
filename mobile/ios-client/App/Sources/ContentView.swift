@@ -68,6 +68,11 @@ private struct HomeProfileSection: Identifiable {
     let rows: [HomeProfileRow]
 }
 
+private struct PresentedError: Identifiable {
+    let id = UUID()
+    let message: String
+}
+
 private enum HomeProfileRow: Identifiable {
     case manual(ManualProfile)
     case subscription(SubscriptionEndpoint)
@@ -202,6 +207,7 @@ struct ContentView: View {
     @State private var selectedTab: RootTab = .home
     @State private var activeSheet: ActiveSheet?
     @State private var detailItem: ProfileDetailItem?
+    @State private var presentedError: PresentedError?
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -237,13 +243,26 @@ struct ContentView: View {
         .sheet(item: $detailItem) { item in
             ProfileDetailView(item: item)
         }
-        .alert("Error", isPresented: Binding(
-            get: { model.errorMessage != nil },
-            set: { if !$0 { model.errorMessage = nil } }
-        )) {
-            Button("OK", role: .cancel) {}
+        .onChange(of: model.errorMessage) { _, newValue in
+            guard let newValue else {
+                return
+            }
+            presentedError = PresentedError(message: newValue)
+        }
+        .alert(
+            "Error",
+            isPresented: Binding(
+                get: { presentedError != nil },
+                set: { if !$0 { presentedError = nil } }
+            ),
+            presenting: presentedError
+        ) { _ in
+            Button("OK", role: .cancel) {
+                presentedError = nil
+                model.errorMessage = nil
+            }
         } message: {
-            Text(model.errorMessage ?? "")
+            Text($0.message)
         }
     }
 }

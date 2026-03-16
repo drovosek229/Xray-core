@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "internet",
     platforms: [
-        .iOS("26.0"),
+        .iOS("17.0"),
         .macOS(.v13),
     ],
     products: [

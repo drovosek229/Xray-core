@@ -292,7 +292,9 @@ private final class NetworkExtensionTunnelPreferencesClient: TunnelPreferencesCl
         proto.excludeLocalNetworks = record.excludeLocalNetworks ?? false
         proto.excludeCellularServices = record.excludeCellularServices ?? false
         proto.excludeAPNs = record.excludeAPNs ?? false
-        proto.excludeDeviceCommunication = record.excludeDeviceCommunication ?? false
+        if #available(iOS 17.4, *) {
+            proto.excludeDeviceCommunication = record.excludeDeviceCommunication ?? false
+        }
         proto.disconnectOnSleep = record.disconnectOnSleep ?? false
 
         manager.localizedDescription = record.localizedDescription
@@ -333,7 +335,12 @@ private final class NetworkExtensionTunnelPreferencesClient: TunnelPreferencesCl
             excludeLocalNetworks: proto?.excludeLocalNetworks,
             excludeCellularServices: proto?.excludeCellularServices,
             excludeAPNs: proto?.excludeAPNs,
-            excludeDeviceCommunication: proto?.excludeDeviceCommunication,
+            excludeDeviceCommunication: {
+                if #available(iOS 17.4, *) {
+                    return proto?.excludeDeviceCommunication
+                }
+                return nil
+            }(),
             disconnectOnSleep: proto?.disconnectOnSleep,
             runtimeConfigurationData: providerConfiguration[AppConfiguration.tunnelProviderConfigurationEnvelopeKey] as? Data,
             systemStatus: manager.connection.status.tunnelSystemStatus,

@@ -108,11 +108,11 @@ Then:
 1. Connect the iPhone.
 2. Enable Developer Mode on the device.
 3. Enable the `Network Extensions` and `Personal VPN` capabilities in Xcode.
-4. Build and install the `XrayIOSClient` target on an iPhone running iOS 26 or newer. The installed app name will be `internet`.
+4. Build and install the `XrayIOSClient` target on an iPhone running iOS 17 or newer. The installed app name will be `internet`.
 
 ## Notes
 
 - The Swift package tests run locally with `swift test --package-path mobile/ios-client`.
 - The Go bridge tests run with `go test ./mobile/iosbridge`.
 - The first version expects a supported subscription link that emits a `VLESS + XHTTP` Xray JSON template over `REALITY` or `TLS`.
-- The app and tunnel extension now target iOS 26 as the minimum deployment version.
+- The app and tunnel extension now target iOS 17 as the minimum deployment version.

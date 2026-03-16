@@ -4,7 +4,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.10"
-    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
 packages:
@@ -17,7 +17,7 @@ targets:
   XrayIOSClient:
     type: application
     platform: iOS
-    deploymentTarget: "26.0"
+    deploymentTarget: "17.0"
     configFiles:
       Debug: Config/App.xcconfig
       Release: Config/App.xcconfig
@@ -52,7 +52,7 @@ targets:
   PacketTunnel:
     type: app-extension
     platform: iOS
-    deploymentTarget: "26.0"
+    deploymentTarget: "17.0"
     configFiles:
       Debug: Config/PacketTunnel.xcconfig
       Release: Config/PacketTunnel.xcconfig
