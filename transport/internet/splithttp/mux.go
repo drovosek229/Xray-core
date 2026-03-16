@@ -74,43 +74,60 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 	m.access.Lock()
 	defer m.access.Unlock()
 
-	m.removeUnusableClientsLocked(ctx)
-	m.scheduleWarmRefillLocked()
+	xmuxClient, usableCount := m.sweepAndPickAvailableClientLocked(ctx)
+	m.scheduleWarmRefillLocked(usableCount)
 
 	if len(m.xmuxClients) == 0 {
 		errors.LogDebug(ctx, "XMUX: creating xmuxClient because xmuxClients is empty")
-		xmuxClient := m.newXmuxClient()
-		m.scheduleWarmRefillLocked()
+		xmuxClient = m.newXmuxClient()
+		m.scheduleWarmRefillLocked(usableCount + 1)
 		return xmuxClient
 	}
 
 	if m.connections > 0 && len(m.xmuxClients) < int(m.connections) {
 		errors.LogDebug(ctx, "XMUX: creating xmuxClient because maxConnections was not hit, xmuxClients = ", len(m.xmuxClients))
-		xmuxClient := m.newXmuxClient()
-		m.scheduleWarmRefillLocked()
+		xmuxClient = m.newXmuxClient()
+		m.scheduleWarmRefillLocked(usableCount + 1)
 		return xmuxClient
 	}
 
-	xmuxClient := m.pickAvailableClientLocked()
 	if xmuxClient == nil {
 		errors.LogDebug(ctx, "XMUX: creating xmuxClient because maxConcurrency was hit, xmuxClients = ", len(m.xmuxClients))
 		xmuxClient = m.newXmuxClient()
-		m.scheduleWarmRefillLocked()
+		m.scheduleWarmRefillLocked(usableCount + 1)
 		return xmuxClient
 	}
 
 	if xmuxClient.leftUsage > 0 {
 		xmuxClient.leftUsage -= 1
+		if xmuxClient.leftUsage == 0 {
+			usableCount -= 1
+		}
 	}
-	m.scheduleWarmRefillLocked()
+	m.scheduleWarmRefillLocked(usableCount)
 	return xmuxClient
 }
 
-func (m *XmuxManager) pickAvailableClientLocked() *XmuxClient {
+func (m *XmuxManager) sweepAndPickAvailableClientLocked(ctx context.Context) (*XmuxClient, int) {
+	now := time.Now()
+	kept := m.xmuxClients[:0]
 	var selected *XmuxClient
+	usableCount := 0
 	eligible := 0
 
 	for _, xmuxClient := range m.xmuxClients {
+		if !m.isUsableClientLocked(xmuxClient, now) {
+			errors.LogDebug(ctx, "XMUX: removing xmuxClient, IsClosed() = ", xmuxClient.XmuxConn.IsClosed(),
+				", OpenUsage = ", xmuxClient.OpenUsage.Load(),
+				", leftUsage = ", xmuxClient.leftUsage,
+				", LeftRequests = ", xmuxClient.LeftRequests.Load(),
+				", UnreusableAt = ", xmuxClient.UnreusableAt)
+			continue
+		}
+
+		kept = append(kept, xmuxClient)
+		usableCount++
+
 		if m.concurrency > 0 && xmuxClient.OpenUsage.Load() >= m.concurrency {
 			continue
 		}
@@ -120,7 +137,9 @@ func (m *XmuxManager) pickAvailableClientLocked() *XmuxClient {
 		}
 	}
 
-	return selected
+	clear(m.xmuxClients[len(kept):])
+	m.xmuxClients = kept
+	return selected, usableCount
 }
 
 func (m *XmuxManager) removeUnusableClientsLocked(ctx context.Context) {
@@ -188,9 +207,9 @@ func (m *XmuxManager) fillWarmClientsLocked(ctx context.Context) {
 	}
 }
 
-func (m *XmuxManager) scheduleWarmRefillLocked() {
+func (m *XmuxManager) scheduleWarmRefillLocked(usableCount int) {
 	target := m.desiredWarmConnectionsLocked()
-	if target == 0 || m.refillScheduled || m.warmUsableCountLocked() >= target {
+	if target == 0 || m.refillScheduled || usableCount >= target {
 		return
 	}
 
