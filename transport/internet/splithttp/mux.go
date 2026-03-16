@@ -120,9 +120,9 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 		xmuxClient.leftUsage -= 1
 		if xmuxClient.leftUsage == 0 && m.usableCount > 0 {
 			m.usableCount -= 1
+			m.scheduleWarmRefillLocked()
 		}
 	}
-	m.scheduleWarmRefillLocked()
 	m.access.Unlock()
 	return xmuxClient
 }
@@ -191,9 +191,13 @@ func (m *XmuxManager) sweepAndPickAvailableClientLocked(ctx context.Context, now
 		}
 	}
 
+	removedCount := len(m.xmuxClients) - len(kept)
 	clear(m.xmuxClients[len(kept):])
 	m.xmuxClients = kept
 	m.usableCount = usableCount
+	if removedCount > 0 {
+		m.scheduleWarmRefillLocked()
+	}
 
 	if selected == nil {
 		selected = wrapped
@@ -221,6 +225,7 @@ func (m *XmuxManager) removeXmuxClientLocked(index int) {
 	m.xmuxClients = m.xmuxClients[:last]
 	if m.usableCount > 0 {
 		m.usableCount -= 1
+		m.scheduleWarmRefillLocked()
 	}
 }
 
