@@ -196,3 +196,22 @@ func TestSplitHTTPBehaviorProfileBuild(t *testing.T) {
 		t.Fatalf("expected balanced xmux defaults to stay unset in config, got %d", balancedBuilt.Xmux.GetMaxConcurrency().GetFrom())
 	}
 }
+
+func TestSplitHTTPXmuxWarmConnectionsBuild(t *testing.T) {
+	config := &SplitHTTPConfig{
+		Path: "/xhttp",
+		Xmux: XmuxConfig{
+			WarmConnections: 2,
+		},
+	}
+
+	message, err := config.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	built := message.(*splithttp.Config)
+	if built.Xmux.GetWarmConnections() != 2 {
+		t.Fatalf("expected xmux warmConnections=2, got %d", built.Xmux.GetWarmConnections())
+	}
+}

@@ -475,6 +475,14 @@ func (m *XmuxConfig) GetNormalizedHMaxReusableSecs() RangeConfig {
 	return *m.HMaxReusableSecs
 }
 
+func (m *XmuxConfig) GetNormalizedWarmConnections() int32 {
+	if m == nil || m.WarmConnections <= 0 {
+		return 0
+	}
+
+	return m.WarmConnections
+}
+
 func init() {
 	common.Must(internet.RegisterProtocolConfigCreator(protocolName, func() interface{} {
 		return new(Config)
