@@ -11,6 +11,9 @@ func TestForkVersioning(t *testing.T) {
 	if got, want := core.ProductName(), "internet core"; got != want {
 		t.Fatalf("unexpected product name: got %q want %q", got, want)
 	}
+	if got, want := core.ReleaseTag(), ""; got != want {
+		t.Fatalf("unexpected release tag: got %q want %q", got, want)
+	}
 	if got, want := core.Version(), "1.0.0"; got != want {
 		t.Fatalf("unexpected product version: got %q want %q", got, want)
 	}
