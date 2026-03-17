@@ -33,6 +33,7 @@ var (
 
 var (
 	build       = "Custom"
+	releaseTag  = ""
 	productName = "internet core"
 	codename    = "internet"
 	intro       = "A fork-owned Xray core for the internet client."
@@ -76,6 +77,11 @@ func UpstreamVersion() string {
 	return fmt.Sprintf("%v.%v.%v", Version_x, Version_y, Version_z)
 }
 
+// ReleaseTag returns the GitHub release tag embedded into the binary, if any.
+func ReleaseTag() string {
+	return releaseTag
+}
+
 // Version returns this fork's product version as a string, in the form of "x.y.z" where x, y and z are numbers.
 // ".z" part may be omitted in regular releases.
 func Version() string {
@@ -84,8 +90,13 @@ func Version() string {
 
 // VersionStatement returns a list of strings representing the full version info.
 func VersionStatement() []string {
+	release := ""
+	if tag := ReleaseTag(); tag != "" {
+		release = "release " + tag + "; "
+	}
+
 	return []string{
-		serial.Concat(ProductName(), " ", Version(), " (", codename, "; based on Xray ", UpstreamVersion(), ") ", build, " (", runtime.Version(), " ", runtime.GOOS, "/", runtime.GOARCH, ")"),
+		serial.Concat(ProductName(), " ", Version(), " (", release, codename, "; based on Xray ", UpstreamVersion(), ") ", build, " (", runtime.Version(), " ", runtime.GOOS, "/", runtime.GOARCH, ")"),
 		intro,
 	}
 }

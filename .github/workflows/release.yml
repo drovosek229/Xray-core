@@ -59,6 +59,62 @@ jobs:
     steps:
       - name: Checkout codebase
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Validate release source
+        if: github.event_name == 'release'
+        run: |
+          set -euo pipefail
+
+          release_tag='${{ github.event.release.tag_name }}'
+          target_commitish='${{ github.event.release.target_commitish }}'
+          event_commit='${{ github.sha }}'
+
+          git fetch --force --tags origin '+refs/heads/*:refs/remotes/origin/*'
+
+          head_commit="$(git rev-parse HEAD)"
+          if [[ "${head_commit}" != "${event_commit}" ]]; then
+            echo "::error::Checked out ${head_commit}, expected release event commit ${event_commit}."
+            exit 1
+          fi
+
+          tag_commit="$(git rev-list -n 1 "refs/tags/${release_tag}^{commit}")"
+          if [[ "${tag_commit}" != "${event_commit}" ]]; then
+            echo "::error::Release tag ${release_tag} resolves to ${tag_commit}, expected ${event_commit}."
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "origin/${target_commitish}^{commit}" >/dev/null; then
+            target_commit="$(git rev-parse "origin/${target_commitish}^{commit}")"
+          elif git rev-parse -q --verify "${target_commitish}^{commit}" >/dev/null; then
+            target_commit="$(git rev-parse "${target_commitish}^{commit}")"
+          else
+            echo "::error::Unable to resolve release target_commitish ${target_commitish}."
+            exit 1
+          fi
+
+          if [[ "${target_commit}" != "${event_commit}" ]]; then
+            echo "::error::Release target ${target_commitish} resolves to ${target_commit}, expected ${event_commit}."
+            exit 1
+          fi
+
+      - name: Resolve build metadata
+        run: |
+          set -euo pipefail
+
+          build_commit="$(git rev-parse --short=7 HEAD)"
+          release_tag=""
+
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            release_tag='${{ github.event.release.tag_name }}'
+          elif git describe --tags --exact-match >/dev/null 2>&1; then
+            release_tag="$(git describe --tags --exact-match)"
+          fi
+
+          echo "BUILD_COMMIT=${build_commit}" >> "${GITHUB_ENV}"
+          echo "RELEASE_TAG=${release_tag}" >> "${GITHUB_ENV}"
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -78,13 +134,12 @@ jobs:
       - name: Build binary
         run: |
           mkdir -p build_assets
-          COMMID=$(git describe --always --dirty)
           go build \
             -o build_assets/xray \
             -trimpath \
             -buildvcs=false \
             -gcflags="all=-l=4" \
-            -ldflags="-X github.com/xtls/xray-core/core.build=${COMMID} -s -w -buildid=" \
+            -ldflags="-X github.com/xtls/xray-core/core.build=${BUILD_COMMIT} -X github.com/xtls/xray-core/core.releaseTag=${RELEASE_TAG} -s -w -buildid=" \
             -v ./main
 
       - name: Assemble package
@@ -93,8 +148,9 @@ jobs:
           cp resources/geosite.dat build_assets/
           cp README.md build_assets/
           cp LICENSE build_assets/
-          printf 'target=%s\ncommit=%s\n' \
+          printf 'target=%s\nrelease=%s\ncommit=%s\n' \
             "${{ matrix.asset_name }}" \
+            "${RELEASE_TAG}" \
             "$(git rev-parse HEAD)" > build_assets/BUILD_INFO.txt
 
       - name: Create archive
