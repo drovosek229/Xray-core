@@ -139,6 +139,159 @@ final class RuntimeConfigBuilderTests: XCTestCase {
         XCTAssertNil(users.first?["flow"])
     }
 
+    func testSimpleRoutingRulesAreInsertedAfterDNSAndBeforeFallback() throws {
+        let profile = ManualProfile(
+            name: "Routing",
+            address: "example.com",
+            port: 443,
+            uuid: "11111111-1111-1111-1111-111111111111",
+            serverName: "cdn.example.com",
+            publicKey: "public-key",
+            xhttpHost: "",
+            xhttpPath: ""
+        )
+        let settings = SimpleRoutingSettings(
+            isEnabled: true,
+            rules: [
+                SimpleRoutingRule(
+                    kind: .geoSite(selectors: ["category-ads-all"]),
+                    target: .block
+                ),
+                SimpleRoutingRule(
+                    kind: .geoIP(selectors: ["  CloudFlare ", " GOOGLE "]),
+                    target: .direct
+                ),
+                SimpleRoutingRule(
+                    kind: .network(.tcpUDP),
+                    target: .proxy
+                ),
+            ]
+        )
+
+        let json = try RuntimeConfigBuilder.build(
+            for: profile,
+            context: RuntimeConfigContext(simpleRoutingSettings: settings)
+        )
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let routing = try XCTUnwrap(object["routing"] as? [String: Any])
+        let rules = try XCTUnwrap(routing["rules"] as? [[String: Any]])
+
+        XCTAssertEqual(routing["domainStrategy"] as? String, "IpIfNonMatch")
+        XCTAssertEqual(rules[0]["outboundTag"] as? String, "dns-out")
+        XCTAssertEqual(rules[1]["domain"] as? [String], ["geosite:category-ads-all"])
+        XCTAssertEqual(rules[1]["outboundTag"] as? String, "block")
+        XCTAssertEqual(rules[2]["ip"] as? [String], ["geoip:cloudflare", "geoip:google"])
+        XCTAssertEqual(rules[2]["outboundTag"] as? String, "direct")
+        XCTAssertEqual(rules[3]["outboundTag"] as? String, "proxy")
+        XCTAssertNil(rules[3]["domain"])
+        XCTAssertNil(rules[3]["ip"])
+        XCTAssertNil(rules[3]["network"])
+    }
+
+    func testDisabledSimpleRoutingKeepsDefaultRulesOnly() throws {
+        let profile = ManualProfile(
+            name: "Disabled Routing",
+            address: "example.com",
+            port: 443,
+            uuid: "11111111-1111-1111-1111-111111111111",
+            serverName: "cdn.example.com",
+            publicKey: "public-key",
+            xhttpHost: "",
+            xhttpPath: ""
+        )
+
+        let json = try RuntimeConfigBuilder.build(
+            for: profile,
+            context: RuntimeConfigContext(
+                simpleRoutingSettings: SimpleRoutingSettings(
+                    isEnabled: false,
+                    rules: [
+                        SimpleRoutingRule(
+                            kind: .geoIP(selectors: ["ru"]),
+                            target: .direct
+                        )
+                    ]
+                )
+            )
+        )
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let routing = try XCTUnwrap(object["routing"] as? [String: Any])
+        let rules = try XCTUnwrap(routing["rules"] as? [[String: Any]])
+
+        XCTAssertEqual(routing["domainStrategy"] as? String, "AsIs")
+        XCTAssertEqual(rules.count, 2)
+        XCTAssertEqual(rules[0]["outboundTag"] as? String, "dns-out")
+        XCTAssertEqual(rules[1]["outboundTag"] as? String, "proxy")
+    }
+
+    func testSimpleRoutingWithOnlyGeoSiteRulesKeepsAsIsDomainStrategy() throws {
+        let profile = ManualProfile(
+            name: "GeoSite Only",
+            address: "example.com",
+            port: 443,
+            uuid: "11111111-1111-1111-1111-111111111111",
+            serverName: "cdn.example.com",
+            publicKey: "public-key",
+            xhttpHost: "",
+            xhttpPath: ""
+        )
+
+        let json = try RuntimeConfigBuilder.build(
+            for: profile,
+            context: RuntimeConfigContext(
+                simpleRoutingSettings: SimpleRoutingSettings(
+                    isEnabled: true,
+                    rules: [
+                        SimpleRoutingRule(
+                            kind: .geoSite(selectors: ["category-ads-all"]),
+                            target: .block
+                        )
+                    ]
+                )
+            )
+        )
+
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let routing = try XCTUnwrap(object["routing"] as? [String: Any])
+
+        XCTAssertEqual(routing["domainStrategy"] as? String, "AsIs")
+    }
+
+    func testSimpleRoutingRejectsEmptyGeoSelectors() throws {
+        let profile = ManualProfile(
+            name: "Invalid Routing",
+            address: "example.com",
+            port: 443,
+            uuid: "11111111-1111-1111-1111-111111111111",
+            serverName: "cdn.example.com",
+            publicKey: "public-key",
+            xhttpHost: "",
+            xhttpPath: ""
+        )
+
+        XCTAssertThrowsError(
+            try RuntimeConfigBuilder.build(
+                for: profile,
+                context: RuntimeConfigContext(
+                    simpleRoutingSettings: SimpleRoutingSettings(
+                        isEnabled: true,
+                        rules: [
+                            SimpleRoutingRule(
+                                kind: .geoSite(selectors: [" ", ""]),
+                                target: .block
+                            )
+                        ]
+                    )
+                )
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? XrayAppCoreError,
+                .invalidProfile("GeoSite rules need at least one selector.")
+            )
+        }
+    }
+
     func testInvalidProfileIsRejected() {
         let profile = ManualProfile(
             name: "",

@@ -17,6 +17,12 @@ final class AppGroupStore {
         try? FileManager.default.createDirectory(at: containerURL, withIntermediateDirectories: true)
     }
 
+    init(defaults: UserDefaults, containerURL: URL) {
+        self.defaults = defaults
+        self.containerURL = containerURL
+        try? FileManager.default.createDirectory(at: containerURL, withIntermediateDirectories: true)
+    }
+
     func save<T: Encodable>(_ value: T, forKey key: String) throws {
         let data = try JSONEncoder().encode(value)
         defaults.set(data, forKey: key)

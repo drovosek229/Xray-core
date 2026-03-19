@@ -7,6 +7,7 @@ public struct RuntimeConfigContext: Sendable {
     public var localSocksListenAddress: String
     public var localSocksListenPort: Int
     public var logFilePath: String?
+    public var simpleRoutingSettings: SimpleRoutingSettings?
 
     public init(
         tunnelName: String = "utun",
@@ -17,7 +18,8 @@ public struct RuntimeConfigContext: Sendable {
         ],
         localSocksListenAddress: String = "127.0.0.1",
         localSocksListenPort: Int = 10_808,
-        logFilePath: String? = nil
+        logFilePath: String? = nil,
+        simpleRoutingSettings: SimpleRoutingSettings? = nil
     ) {
         self.tunnelName = tunnelName
         self.tunnelMTU = tunnelMTU
@@ -25,6 +27,7 @@ public struct RuntimeConfigContext: Sendable {
         self.localSocksListenAddress = localSocksListenAddress
         self.localSocksListenPort = localSocksListenPort
         self.logFilePath = logFilePath
+        self.simpleRoutingSettings = simpleRoutingSettings
     }
 }
 
@@ -134,6 +137,10 @@ public enum RuntimeConfigBuilder {
             : xhttpPath.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedAdvancedXHTTPSettings = xhttpAdvancedSettings?.normalized
         let normalizedXmuxSettings = effectiveXmuxSettings(from: normalizedAdvancedXHTTPSettings)
+        let routingRules = try makeRoutingRules(simpleRoutingSettings: context.simpleRoutingSettings)
+        let routingDomainStrategy = routingRules.contains(where: { $0.ip != nil && $0.outboundTag != "dns-out" })
+            ? "IpIfNonMatch"
+            : "AsIs"
 
         let root = RuntimeConfig(
             log: context.logFilePath.map { RuntimeLog(logLevel: "warning", error: $0) },
@@ -222,21 +229,8 @@ public enum RuntimeConfigBuilder {
                 RuntimeOutbound(tag: "block", protocolName: "blackhole"),
             ],
             routing: RuntimeRouting(
-                domainStrategy: "AsIs",
-                rules: [
-                    RuntimeRule(
-                        type: "field",
-                        inboundTag: ["socks-in"],
-                        network: "udp",
-                        port: "53",
-                        outboundTag: "dns-out"
-                    ),
-                    RuntimeRule(
-                        type: "field",
-                        inboundTag: ["socks-in"],
-                        outboundTag: "proxy"
-                    )
-                ]
+                domainStrategy: routingDomainStrategy,
+                rules: routingRules
             ),
             dns: RuntimeDNS(
                 servers: context.dnsServers,
@@ -253,6 +247,63 @@ public enum RuntimeConfigBuilder {
             throw XrayAppCoreError.invalidProfile("Failed to encode runtime config.")
         }
         return json
+    }
+
+    private static func makeRoutingRules(
+        simpleRoutingSettings: SimpleRoutingSettings?
+    ) throws -> [RuntimeRule] {
+        var rules = [
+            RuntimeRule(
+                type: "field",
+                inboundTag: ["socks-in"],
+                network: "udp",
+                port: "53",
+                outboundTag: "dns-out"
+            )
+        ]
+
+        let normalizedSettings = simpleRoutingSettings?.normalized ?? SimpleRoutingSettings()
+        if normalizedSettings.isEnabled {
+            for rule in normalizedSettings.rules {
+                switch rule.kind {
+                case let .geoSite(selectors):
+                    guard !selectors.isEmpty else {
+                        throw XrayAppCoreError.invalidProfile("GeoSite rules need at least one selector.")
+                    }
+                    rules.append(
+                        RuntimeRule(
+                            type: "field",
+                            inboundTag: ["socks-in"],
+                            domain: selectors.map { "geosite:\($0)" },
+                            outboundTag: rule.target.rawValue
+                        )
+                    )
+                case let .geoIP(selectors):
+                    guard !selectors.isEmpty else {
+                        throw XrayAppCoreError.invalidProfile("GeoIP rules need at least one selector.")
+                    }
+                    rules.append(
+                        RuntimeRule(
+                            type: "field",
+                            inboundTag: ["socks-in"],
+                            ip: selectors.map { "geoip:\($0)" },
+                            outboundTag: rule.target.rawValue
+                        )
+                    )
+                case .network:
+                    continue
+                }
+            }
+        }
+
+        rules.append(
+            RuntimeRule(
+                type: "field",
+                inboundTag: ["socks-in"],
+                outboundTag: "proxy"
+            )
+        )
+        return rules
     }
 
     private static func normalizeHTTPMethod(_ value: String) -> String {
@@ -537,6 +588,8 @@ private struct RuntimeRouting: Encodable {
 private struct RuntimeRule: Encodable {
     let type: String
     let inboundTag: [String]
+    let domain: [String]?
+    let ip: [String]?
     let network: String?
     let port: String?
     let outboundTag: String
@@ -544,12 +597,16 @@ private struct RuntimeRule: Encodable {
     init(
         type: String,
         inboundTag: [String],
+        domain: [String]? = nil,
+        ip: [String]? = nil,
         network: String? = nil,
         port: String? = nil,
         outboundTag: String
     ) {
         self.type = type
         self.inboundTag = inboundTag
+        self.domain = domain
+        self.ip = ip
         self.network = network
         self.port = port
         self.outboundTag = outboundTag
@@ -569,4 +626,15 @@ private func emptyToNil(_ value: String?) -> String? {
     }
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? nil : trimmed
+}
+
+private func runtimeNetworkValue(_ network: SimpleRoutingNetwork) -> String {
+    switch network {
+    case .tcp:
+        return "tcp"
+    case .udp:
+        return "udp"
+    case .tcpUDP:
+        return "tcp,udp"
+    }
 }

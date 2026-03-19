@@ -128,6 +128,7 @@ struct TunnelRuntimeState: Codable, Hashable, Sendable {
     var recoveryAttempt: Int?
     var lastRecoveryTrigger: TunnelLocalFailureReason?
     var lastHealthyAt: Date?
+    var directEgressStatus: TunnelDirectEgressStatus?
 
     init(
         sessionID: UUID? = nil,
@@ -146,7 +147,8 @@ struct TunnelRuntimeState: Codable, Hashable, Sendable {
         lastKnownSystemStatus: TunnelSystemStatus? = nil,
         recoveryAttempt: Int? = nil,
         lastRecoveryTrigger: TunnelLocalFailureReason? = nil,
-        lastHealthyAt: Date? = nil
+        lastHealthyAt: Date? = nil,
+        directEgressStatus: TunnelDirectEgressStatus? = nil
     ) {
         self.sessionID = sessionID
         self.activeTunnelTarget = activeTunnelTarget
@@ -165,6 +167,7 @@ struct TunnelRuntimeState: Codable, Hashable, Sendable {
         self.recoveryAttempt = recoveryAttempt
         self.lastRecoveryTrigger = lastRecoveryTrigger
         self.lastHealthyAt = lastHealthyAt
+        self.directEgressStatus = directEgressStatus
     }
 
     var isCleanStop: Bool {

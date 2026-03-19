@@ -22,6 +22,7 @@ final class AppModel: ObservableObject {
     @Published var latestBenchmarkResult: TunnelBenchmarkResult?
     @Published var remoteGeoAssetSettings = RemoteGeoAssetSettings()
     @Published var remoteGeoAssetRefreshState = RemoteGeoAssetRefreshState()
+    @Published var simpleRoutingSettings = SimpleRoutingSettings()
     @Published var isRefreshingRemoteGeoAssets = false
 
     private let repository: ProfileRepository
@@ -74,36 +75,24 @@ final class AppModel: ObservableObject {
             latestBenchmarkResult = try benchmarkStore.loadLatestResult()
             remoteGeoAssetSettings = try preferencesStore.loadRemoteGeoAssetSettings()
             remoteGeoAssetRefreshState = try remoteGeoAssetManager.loadRefreshState()
+            simpleRoutingSettings = try preferencesStore.loadSimpleRoutingSettings()
 
             try reconcileActiveTunnelTarget()
-            let snapshot = try await tunnelManager.loadOrCreateManager()
-            if snapshot.reprovisioned {
-                appendLog("Reconciled the VPN configuration.")
-            }
-            await handleTunnelStatusChange(
-                snapshot.systemStatus.networkExtensionStatus,
-                connectedDate: snapshot.connectedDate
-            )
-
-            await refreshLatenciesIfNeeded()
         } catch {
             setError(error)
+            return
         }
+
+        await refreshTunnelStatusFromSystem(
+            failurePrefix: "Failed to inspect VPN configuration"
+        )
+        await refreshLatenciesIfNeeded()
     }
 
     func handleSceneDidBecomeActive() async {
-        do {
-            let snapshot = try await tunnelManager.reconcileForForeground()
-            if snapshot.reprovisioned {
-                appendLog("Repaired the VPN configuration after returning to the app.")
-            }
-            await handleTunnelStatusChange(
-                snapshot.systemStatus.networkExtensionStatus,
-                connectedDate: snapshot.connectedDate
-            )
-        } catch {
-            appendLog("Failed to reconcile VPN configuration: \(error.localizedDescription)")
-        }
+        await refreshTunnelStatusFromSystem(
+            failurePrefix: "Failed to inspect VPN configuration"
+        )
     }
 
     @discardableResult
@@ -224,6 +213,9 @@ final class AppModel: ObservableObject {
                 throw XrayAppCoreError.invalidProfile("The active profile is no longer available.")
             }
 
+            let persistedRemoteGeoAssetSettings = try preferencesStore.loadRemoteGeoAssetSettings()
+            let persistedSimpleRoutingSettings = try preferencesStore.loadSimpleRoutingSettings()
+
             let configBuildStartedAt = DispatchTime.now()
             let configJSON: String
             switch resolvedProfile {
@@ -233,7 +225,8 @@ final class AppModel: ObservableObject {
                     context: RuntimeConfigContext(
                         dnsServers: AppConfiguration.runtimeDoHServers,
                         localSocksListenAddress: AppConfiguration.localSocksListenAddress,
-                        localSocksListenPort: AppConfiguration.localSocksListenPort
+                        localSocksListenPort: AppConfiguration.localSocksListenPort,
+                        simpleRoutingSettings: persistedSimpleRoutingSettings
                     )
                 )
             case let .subscriptionEndpoint(endpoint):
@@ -242,7 +235,8 @@ final class AppModel: ObservableObject {
                     context: RuntimeConfigContext(
                         dnsServers: AppConfiguration.runtimeDoHServers,
                         localSocksListenAddress: AppConfiguration.localSocksListenAddress,
-                        localSocksListenPort: AppConfiguration.localSocksListenPort
+                        localSocksListenPort: AppConfiguration.localSocksListenPort,
+                        simpleRoutingSettings: persistedSimpleRoutingSettings
                     )
                 )
             }
@@ -254,7 +248,7 @@ final class AppModel: ObservableObject {
                 targetName: profileLabel(for: resolvedProfile),
                 runtimeConfigJSON: configJSON,
                 routePolicy: .disabled,
-                remoteGeoAssetSettings: remoteGeoAssetSettingsSnapshot()
+                remoteGeoAssetSettings: remoteGeoAssetSettingsSnapshot(persistedRemoteGeoAssetSettings)
             )
             do {
                 let snapshot = try await performConnectAttempt(
@@ -280,7 +274,7 @@ final class AppModel: ObservableObject {
                     targetName: providerConfiguration.targetName,
                     runtimeConfigJSON: configJSON,
                     routePolicy: .disabled,
-                    remoteGeoAssetSettings: remoteGeoAssetSettingsSnapshot()
+                    remoteGeoAssetSettings: remoteGeoAssetSettingsSnapshot(persistedRemoteGeoAssetSettings)
                 )
                 let snapshot = try await performConnectAttempt(
                     providerConfiguration: retryConfiguration,
@@ -302,7 +296,8 @@ final class AppModel: ObservableObject {
                 phase: .failed,
                 lastError: error.localizedDescription,
                 stopOrigin: .launchFailure,
-                lastKnownSystemStatus: .invalid
+                lastKnownSystemStatus: .invalid,
+                directEgressStatus: tunnelRuntimeState?.directEgressStatus
             )
             try? tunnelSessionStore.saveRuntimeState(runtimeState)
             tunnelRuntimeState = runtimeState
@@ -326,7 +321,8 @@ final class AppModel: ObservableObject {
                 lastError: nil,
                 configHash: tunnelRuntimeState?.configHash,
                 stopOrigin: .app,
-                lastKnownSystemStatus: .disconnecting
+                lastKnownSystemStatus: .disconnecting,
+                directEgressStatus: tunnelRuntimeState?.directEgressStatus
             )
             try? tunnelSessionStore.saveRuntimeState(runtimeState)
             tunnelRuntimeState = runtimeState
@@ -344,17 +340,50 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func saveRemoteGeoAssetSettings() {
+    func saveRoutingConfiguration() {
         do {
-            remoteGeoAssetSettings = RemoteGeoAssetSettings(
-                geoIPURLString: remoteGeoAssetSettings.geoIPURLString.trimmingCharacters(in: .whitespacesAndNewlines),
-                geoSiteURLString: remoteGeoAssetSettings.geoSiteURLString.trimmingCharacters(in: .whitespacesAndNewlines)
-            )
-            try preferencesStore.saveRemoteGeoAssetSettings(remoteGeoAssetSettings)
-            appendLog("Saved remote geo asset settings")
+            let normalizedRemoteGeoAssetSettings = normalizedRemoteGeoAssetSettings()
+            let normalizedSimpleRoutingSettings = try normalizedSimpleRoutingSettings()
+
+            remoteGeoAssetSettings = normalizedRemoteGeoAssetSettings
+            simpleRoutingSettings = normalizedSimpleRoutingSettings
+
+            try preferencesStore.saveRemoteGeoAssetSettings(normalizedRemoteGeoAssetSettings)
+            try preferencesStore.saveSimpleRoutingSettings(normalizedSimpleRoutingSettings)
+            appendLog("Saved routing settings")
         } catch {
             setError(error)
         }
+    }
+
+    func applyRussiaRoutingPreset() {
+        remoteGeoAssetSettings = AppConfiguration.russiaPresetRemoteGeoAssetSettings
+        simpleRoutingSettings = AppConfiguration.russiaPresetSimpleRoutingSettings
+        appendLog("Loaded the Russia preset into the routing editor")
+    }
+
+    func addRoutingRule() {
+        simpleRoutingSettings.rules.append(
+            SimpleRoutingRule(
+                kind: .geoSite(selectors: []),
+                target: .proxy
+            )
+        )
+    }
+
+    func deleteRoutingRule(id: UUID) {
+        simpleRoutingSettings.rules.removeAll { $0.id == id }
+    }
+
+    func moveRoutingRules(from source: IndexSet, to destination: Int) {
+        var reorderedRules = simpleRoutingSettings.rules
+        let movingRules = source.sorted().map { reorderedRules[$0] }
+        for index in source.sorted(by: >) {
+            reorderedRules.remove(at: index)
+        }
+        let adjustedDestination = destination - source.filter { $0 < destination }.count
+        reorderedRules.insert(contentsOf: movingRules, at: adjustedDestination)
+        simpleRoutingSettings.rules = reorderedRules
     }
 
     func refreshRemoteGeoAssets(force: Bool = true) async {
@@ -698,6 +727,21 @@ final class AppModel: ObservableObject {
         logStore.append(message)
     }
 
+    private func refreshTunnelStatusFromSystem(failurePrefix: String) async {
+        do {
+            let snapshot = try await tunnelManager.inspectCurrentConfiguration()
+            if snapshot.managerAvailable, !snapshot.isHealthy {
+                appendLog("VPN configuration looks stale and will be repaired when you connect.")
+            }
+            await handleTunnelStatusChange(
+                snapshot.systemStatus.networkExtensionStatus,
+                connectedDate: snapshot.connectedDate
+            )
+        } catch {
+            appendLog("\(failurePrefix): \(error.localizedDescription)")
+        }
+    }
+
     private func performConnectAttempt(
         providerConfiguration: TunnelProviderConfigurationEnvelope,
         forceReprovision: Bool,
@@ -842,8 +886,34 @@ final class AppModel: ObservableObject {
         return "\(value)ms"
     }
 
-    private func remoteGeoAssetSettingsSnapshot() -> RemoteGeoAssetSettings? {
-        remoteGeoAssetSettings.hasAnyConfiguredAssets ? remoteGeoAssetSettings : nil
+    private func normalizedRemoteGeoAssetSettings() -> RemoteGeoAssetSettings {
+        RemoteGeoAssetSettings(
+            geoIPURLString: remoteGeoAssetSettings.geoIPURLString.trimmingCharacters(in: .whitespacesAndNewlines),
+            geoSiteURLString: remoteGeoAssetSettings.geoSiteURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    private func normalizedSimpleRoutingSettings() throws -> SimpleRoutingSettings {
+        let normalized = simpleRoutingSettings.normalized.withoutDeprecatedNetworkRules
+        for rule in normalized.rules {
+            switch rule.kind {
+            case let .geoSite(selectors):
+                guard !selectors.isEmpty else {
+                    throw XrayAppCoreError.invalidProfile("GeoSite rules need at least one selector.")
+                }
+            case let .geoIP(selectors):
+                guard !selectors.isEmpty else {
+                    throw XrayAppCoreError.invalidProfile("GeoIP rules need at least one selector.")
+                }
+            case .network:
+                break
+            }
+        }
+        return normalized
+    }
+
+    private func remoteGeoAssetSettingsSnapshot(_ settings: RemoteGeoAssetSettings) -> RemoteGeoAssetSettings? {
+        settings.hasAnyConfiguredAssets ? settings : nil
     }
 
     private static func elapsedMilliseconds(since start: DispatchTime) -> Int {

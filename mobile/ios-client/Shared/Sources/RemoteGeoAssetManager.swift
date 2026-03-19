@@ -109,6 +109,7 @@ struct RemoteGeoAssetRefreshState: Codable, Hashable, Sendable {
 
 enum RemoteGeoAssetManagerError: LocalizedError {
     case invalidURL(RemoteGeoAssetKind)
+    case timedOut(RemoteGeoAssetKind)
     case unexpectedStatusCode(RemoteGeoAssetKind, Int)
     case emptyPayload(RemoteGeoAssetKind)
     case malformedPayload(RemoteGeoAssetKind)
@@ -117,6 +118,8 @@ enum RemoteGeoAssetManagerError: LocalizedError {
         switch self {
         case let .invalidURL(kind):
             return "\(kind.displayName) URL must use https."
+        case let .timedOut(kind):
+            return "Timed out while downloading \(kind.displayName)."
         case let .unexpectedStatusCode(kind, code):
             return "Failed to download \(kind.displayName): HTTP \(code)."
         case let .emptyPayload(kind):
@@ -128,12 +131,18 @@ enum RemoteGeoAssetManagerError: LocalizedError {
 }
 
 final class RemoteGeoAssetManager {
+    private struct AssetRefreshOutcome {
+        let kind: RemoteGeoAssetKind
+        let status: RemoteGeoAssetStatus
+        let hardFailure: Error?
+    }
+
     private let appGroupStore: AppGroupStore
     private let session: URLSession
 
     init(
         appGroupStore: AppGroupStore = AppGroupStore(),
-        session: URLSession = .shared
+        session: URLSession = makeDefaultRemoteGeoAssetSession()
     ) {
         self.appGroupStore = appGroupStore
         self.session = session
@@ -158,19 +167,39 @@ final class RemoteGeoAssetManager {
         settings: RemoteGeoAssetSettings,
         force: Bool = false
     ) async throws -> RemoteGeoAssetRefreshState {
-        var refreshState = try loadRefreshState()
+        let refreshState = try loadRefreshState()
+        let geoIPStatus = refreshState.status(for: .geoIP)
+        let geoSiteStatus = refreshState.status(for: .geoSite)
 
-        for kind in RemoteGeoAssetKind.allCases {
-            refreshState = try await refreshAsset(
-                kind: kind,
-                settings: settings,
-                refreshState: refreshState,
-                force: force
-            )
+        async let geoIPOutcome = refreshAsset(
+            kind: .geoIP,
+            settings: settings,
+            currentStatus: geoIPStatus,
+            force: force
+        )
+        async let geoSiteOutcome = refreshAsset(
+            kind: .geoSite,
+            settings: settings,
+            currentStatus: geoSiteStatus,
+            force: force
+        )
+
+        let outcomes = await [geoIPOutcome, geoSiteOutcome]
+        var updatedState = refreshState
+        var firstHardFailure: Error?
+
+        for outcome in outcomes {
+            updatedState.setStatus(outcome.status, for: outcome.kind)
+            if firstHardFailure == nil {
+                firstHardFailure = outcome.hardFailure
+            }
         }
 
-        try saveRefreshState(refreshState)
-        return refreshState
+        try saveRefreshState(updatedState)
+        if let firstHardFailure {
+            throw firstHardFailure
+        }
+        return updatedState
     }
 
     func refreshIfNeededBlocking(
@@ -203,26 +232,26 @@ final class RemoteGeoAssetManager {
     private func refreshAsset(
         kind: RemoteGeoAssetKind,
         settings: RemoteGeoAssetSettings,
-        refreshState: RemoteGeoAssetRefreshState,
+        currentStatus: RemoteGeoAssetStatus,
         force: Bool
-    ) async throws -> RemoteGeoAssetRefreshState {
-        var updatedState = refreshState
-        var currentStatus = refreshState.status(for: kind)
+    ) async -> AssetRefreshOutcome {
+        var currentStatus = currentStatus
         let fileURL = appGroupStore.fileURL(named: kind.fileName)
 
         guard let configuredURLString = settings.normalizedURLString(for: kind) else {
             currentStatus = RemoteGeoAssetStatus()
-            updatedState.setStatus(currentStatus, for: kind)
             removeItemIfPresent(at: fileURL)
-            return updatedState
+            return AssetRefreshOutcome(kind: kind, status: currentStatus, hardFailure: nil)
         }
 
         guard let assetURL = settings.url(for: kind) else {
             currentStatus.sourceURLString = configuredURLString
             currentStatus.lastError = RemoteGeoAssetManagerError.invalidURL(kind).localizedDescription
-            updatedState.setStatus(currentStatus, for: kind)
-            try saveRefreshState(updatedState)
-            throw RemoteGeoAssetManagerError.invalidURL(kind)
+            return AssetRefreshOutcome(
+                kind: kind,
+                status: currentStatus,
+                hardFailure: RemoteGeoAssetManagerError.invalidURL(kind)
+            )
         }
 
         let hasMatchingValidCache =
@@ -235,8 +264,7 @@ final class RemoteGeoAssetManager {
            Date().timeIntervalSince(lastSuccessfulRefreshAt) < AppConfiguration.remoteGeoAssetRefreshInterval
         {
             currentStatus.lastError = nil
-            updatedState.setStatus(currentStatus, for: kind)
-            return updatedState
+            return AssetRefreshOutcome(kind: kind, status: currentStatus, hardFailure: nil)
         }
 
         do {
@@ -249,20 +277,18 @@ final class RemoteGeoAssetManager {
                 lastSuccessfulRefreshAt: Date(),
                 lastError: nil
             )
-            updatedState.setStatus(currentStatus, for: kind)
-            return updatedState
+            return AssetRefreshOutcome(kind: kind, status: currentStatus, hardFailure: nil)
         } catch {
+            let resolvedError = resolvedError(error, kind: kind)
             if hasMatchingValidCache {
-                currentStatus.lastError = error.localizedDescription
-                updatedState.setStatus(currentStatus, for: kind)
-                return updatedState
+                currentStatus.sourceURLString = assetURL.absoluteString
+                currentStatus.lastError = resolvedError.localizedDescription
+                return AssetRefreshOutcome(kind: kind, status: currentStatus, hardFailure: nil)
             }
 
             currentStatus.sourceURLString = assetURL.absoluteString
-            currentStatus.lastError = error.localizedDescription
-            updatedState.setStatus(currentStatus, for: kind)
-            try saveRefreshState(updatedState)
-            throw error
+            currentStatus.lastError = resolvedError.localizedDescription
+            return AssetRefreshOutcome(kind: kind, status: currentStatus, hardFailure: resolvedError)
         }
     }
 
@@ -307,6 +333,22 @@ final class RemoteGeoAssetManager {
             try? FileManager.default.removeItem(at: fileURL)
         }
     }
+
+    private func resolvedError(_ error: Error, kind: RemoteGeoAssetKind) -> Error {
+        if let urlError = error as? URLError, urlError.code == .timedOut {
+            return RemoteGeoAssetManagerError.timedOut(kind)
+        }
+        return error
+    }
+
+}
+
+private func makeDefaultRemoteGeoAssetSession() -> URLSession {
+    let configuration = URLSessionConfiguration.default
+    configuration.timeoutIntervalForRequest = AppConfiguration.remoteGeoAssetRequestTimeout
+    configuration.timeoutIntervalForResource = AppConfiguration.remoteGeoAssetResourceTimeout
+    configuration.waitsForConnectivity = false
+    return URLSession(configuration: configuration)
 }
 
 struct RemoteGeoAssetRuntimePreparation {

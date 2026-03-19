@@ -3,6 +3,32 @@ import XCTest
 @testable import XrayClientShared
 
 final class TunnelProvisioningControllerTests: XCTestCase {
+    func testPersistedTunnelManagerIdentifierWinsOverLegacyFallback() {
+        let providerConfiguration: [String: Any] = [
+            AppConfiguration.tunnelProviderConfigurationManagerIdentifierKey: "stable-manager-id",
+        ]
+
+        let identifier = tunnelManagerIdentifier(
+            from: providerConfiguration,
+            bundleIdentifier: "com.example.internet.PacketTunnel",
+            serverAddress: "internet",
+            fallbackIndex: 0
+        )
+
+        XCTAssertEqual(identifier, "stable-manager-id")
+    }
+
+    func testTunnelManagerIdentifierFallsBackWhenPersistedValueIsMissing() {
+        let identifier = tunnelManagerIdentifier(
+            from: [:],
+            bundleIdentifier: "com.example.internet.PacketTunnel",
+            serverAddress: "internet",
+            fallbackIndex: 2
+        )
+
+        XCTAssertEqual(identifier, "com.example.internet.PacketTunnel|internet|2")
+    }
+
     func testNoManagerCreatesAndSavesOne() async throws {
         let client = FakeTunnelPreferencesClient()
         let controller = makeController(client: client)
@@ -15,6 +41,20 @@ final class TunnelProvisioningControllerTests: XCTestCase {
         XCTAssertTrue(result.snapshot.reprovisioned)
         XCTAssertTrue(result.snapshot.isHealthy)
         XCTAssertTrue(result.snapshot.managerAvailable)
+    }
+
+    func testInspectOnlyWithoutManagerDoesNotCreateOrSaveOne() async throws {
+        let client = FakeTunnelPreferencesClient()
+        let controller = makeController(client: client)
+
+        let result = try await controller.reconcile(policy: .inspectOnly)
+
+        XCTAssertNil(result.record)
+        XCTAssertTrue(client.savedRecords.isEmpty)
+        XCTAssertFalse(result.snapshot.hadExistingManager)
+        XCTAssertFalse(result.snapshot.reprovisioned)
+        XCTAssertFalse(result.snapshot.isHealthy)
+        XCTAssertFalse(result.snapshot.managerAvailable)
     }
 
     func testStaleManagerIsRewrittenAndReloaded() async throws {
@@ -49,6 +89,37 @@ final class TunnelProvisioningControllerTests: XCTestCase {
         XCTAssertTrue(result.snapshot.hadExistingManager)
         XCTAssertTrue(result.snapshot.reprovisioned)
         XCTAssertTrue(result.snapshot.isHealthy)
+    }
+
+    func testInspectOnlyStaleManagerDoesNotRewriteUntilConnect() async throws {
+        let client = FakeTunnelPreferencesClient()
+        let staleRecord = TunnelManagerRecord(
+            identifier: "existing",
+            localizedDescription: "old",
+            isEnabled: false,
+            providerBundleIdentifier: "com.example.internet.PacketTunnel",
+            serverAddress: "old",
+            appGroupIdentifier: "group.old",
+            configurationVersion: 0,
+            includeAllNetworks: false,
+            excludeLocalNetworks: false,
+            excludeCellularServices: false,
+            excludeAPNs: false,
+            excludeDeviceCommunication: false,
+            disconnectOnSleep: true,
+            systemStatus: .disconnected
+        )
+        client.records = [staleRecord]
+        let controller = makeController(client: client)
+
+        let result = try await controller.reconcile(policy: .inspectOnly)
+
+        XCTAssertEqual(result.record, staleRecord)
+        XCTAssertTrue(client.savedRecords.isEmpty)
+        XCTAssertTrue(result.snapshot.hadExistingManager)
+        XCTAssertFalse(result.snapshot.reprovisioned)
+        XCTAssertFalse(result.snapshot.isHealthy)
+        XCTAssertTrue(result.snapshot.managerAvailable)
     }
 
     func testMultipleMatchingManagersAreRemovedAndRecreated() async throws {
@@ -120,8 +191,8 @@ final class TunnelProvisioningControllerTests: XCTestCase {
         ]
         let controller = makeController(client: client)
 
-        let first = try await controller.reconcile(policy: .ensurePresent)
-        let second = try await controller.reconcile(policy: .ensurePresent)
+        let first = try await controller.reconcile(policy: .inspectOnly)
+        let second = try await controller.reconcile(policy: .inspectOnly)
 
         XCTAssertEqual(first.snapshot.systemStatus, .disconnected)
         XCTAssertEqual(second.snapshot.systemStatus, .connected)

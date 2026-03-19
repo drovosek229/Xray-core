@@ -1,4 +1,5 @@
 import Foundation
+import XrayAppCore
 
 enum AppConfiguration {
     static var appDisplayName: String {
@@ -52,8 +53,10 @@ enum AppConfiguration {
     static let latestBenchmarkResultKey = "latest_benchmark_result"
     static let remoteGeoAssetSettingsKey = "remote_geo_asset_settings"
     static let remoteGeoAssetRefreshStateKey = "remote_geo_asset_refresh_state"
+    static let simpleRoutingSettingsKey = "simple_routing_settings"
     static let tunnelRuntimeStateFileName = "tunnel_runtime_state.json"
     static let tunnelProviderConfigurationAppGroupKey = "AppGroupIdentifier"
+    static let tunnelProviderConfigurationManagerIdentifierKey = "ManagerIdentifier"
     static let tunnelProviderConfigurationVersionKey = "ConfigurationVersion"
     static let tunnelProviderConfigurationEnvelopeKey = "RuntimeEnvelope"
     static let tunnelConfigurationVersion = 2
@@ -76,6 +79,36 @@ enum AppConfiguration {
     static let xrayLogFileName = "xray.log"
     static let eventsLogFileName = "client-events.log"
     static let remoteGeoAssetRefreshInterval: TimeInterval = 24 * 60 * 60
+    static let remoteGeoAssetRequestTimeout: TimeInterval = 15
+    static let remoteGeoAssetResourceTimeout: TimeInterval = 90
     static let geoIPAssetFileName = "geoip.dat"
     static let geoSiteAssetFileName = "geosite.dat"
+    static let russiaPresetGeoIPURLString =
+        "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat"
+    static let russiaPresetGeoSiteURLString =
+        "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat"
+    static let russiaPresetRemoteGeoAssetSettings = RemoteGeoAssetSettings(
+        geoIPURLString: russiaPresetGeoIPURLString,
+        geoSiteURLString: russiaPresetGeoSiteURLString
+    )
+    static let russiaPresetSimpleRoutingSettings = SimpleRoutingSettings(
+        isEnabled: true,
+        rules: [
+            SimpleRoutingRule(
+                id: UUID(uuidString: "2f9f79e0-feca-4b35-9193-6da9a51d1fb9")!,
+                kind: .geoSite(selectors: ["category-ads-all"]),
+                target: .block
+            ),
+            SimpleRoutingRule(
+                id: UUID(uuidString: "99dd8b1c-20e4-43bb-bb51-4738062d87bf")!,
+                kind: .geoIP(selectors: ["cloudflare", "google"]),
+                target: .proxy
+            ),
+            SimpleRoutingRule(
+                id: UUID(uuidString: "6c515c38-70bc-4745-a68d-fe374db1a92f")!,
+                kind: .geoIP(selectors: ["ru"]),
+                target: .direct
+            ),
+        ]
+    )
 }

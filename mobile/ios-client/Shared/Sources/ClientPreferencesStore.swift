@@ -1,4 +1,5 @@
 import Foundation
+import XrayAppCore
 
 enum HomeSortMode: String, Codable, CaseIterable {
     case latency
@@ -44,5 +45,20 @@ final class ClientPreferencesStore {
 
     func saveRemoteGeoAssetSettings(_ value: RemoteGeoAssetSettings) throws {
         try appGroupStore.save(value, forKey: AppConfiguration.remoteGeoAssetSettingsKey)
+    }
+
+    func loadSimpleRoutingSettings() throws -> SimpleRoutingSettings {
+        let loaded = try appGroupStore.load(
+            SimpleRoutingSettings.self,
+            forKey: AppConfiguration.simpleRoutingSettingsKey
+        ) ?? SimpleRoutingSettings()
+        return loaded.normalized.withoutDeprecatedNetworkRules
+    }
+
+    func saveSimpleRoutingSettings(_ value: SimpleRoutingSettings) throws {
+        try appGroupStore.save(
+            value.normalized.withoutDeprecatedNetworkRules,
+            forKey: AppConfiguration.simpleRoutingSettingsKey
+        )
     }
 }

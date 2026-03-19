@@ -12,7 +12,12 @@ final class TunnelSessionStoreTests: XCTestCase {
             targetName: "Imported",
             phase: .starting,
             runtimeStage: .startup,
-            lastError: "provider failed"
+            lastError: "provider failed",
+            directEgressStatus: .bound(
+                interfaceName: "en0",
+                sourceAddress: "192.168.1.25",
+                sourceAddressFamily: .ipv4
+            )
         )
 
         try harness.store.saveRuntimeState(state)
@@ -38,7 +43,8 @@ final class TunnelSessionStoreTests: XCTestCase {
                 lastKnownSystemStatus: .connected,
                 recoveryAttempt: 1,
                 lastRecoveryTrigger: .tun2SocksExited,
-                lastHealthyAt: Date(timeIntervalSince1970: 100)
+                lastHealthyAt: Date(timeIntervalSince1970: 100),
+                directEgressStatus: .blocked(reason: "No usable physical interface")
             )
         )
 
@@ -52,6 +58,11 @@ final class TunnelSessionStoreTests: XCTestCase {
             state.recoveryAttempt = 0
             state.lastRecoveryTrigger = .healthCheckFailed
             state.lastHealthyAt = Date(timeIntervalSince1970: 200)
+            state.directEgressStatus = .bound(
+                interfaceName: "pdp_ip0",
+                sourceAddress: "10.0.0.20",
+                sourceAddressFamily: .ipv4
+            )
         }
 
         let updated = try XCTUnwrap(harness.store.loadRuntimeState())
@@ -60,6 +71,10 @@ final class TunnelSessionStoreTests: XCTestCase {
         XCTAssertEqual(updated.recoveryAttempt, 0)
         XCTAssertEqual(updated.lastRecoveryTrigger, .healthCheckFailed)
         XCTAssertEqual(updated.lastHealthyAt, Date(timeIntervalSince1970: 200))
+        XCTAssertEqual(
+            updated.directEgressStatus,
+            .bound(interfaceName: "pdp_ip0", sourceAddress: "10.0.0.20", sourceAddressFamily: .ipv4)
+        )
     }
 }
 
@@ -67,7 +82,7 @@ private struct TunnelSessionHarness {
     let store: TunnelSessionStore
 
     init() {
-        let appGroupStore = AppGroupStore(appGroupIdentifier: "tests.internet.\(UUID().uuidString.lowercased())")
+        let appGroupStore = makeTestAppGroupStore()
         store = TunnelSessionStore(appGroupStore: appGroupStore)
     }
 }

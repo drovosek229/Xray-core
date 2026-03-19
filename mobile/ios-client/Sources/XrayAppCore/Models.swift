@@ -468,6 +468,139 @@ extension ProfileReference: Codable {
     }
 }
 
+public struct SimpleRoutingSettings: Codable, Hashable, Sendable {
+    public var isEnabled: Bool
+    public var rules: [SimpleRoutingRule]
+
+    public init(
+        isEnabled: Bool = false,
+        rules: [SimpleRoutingRule] = []
+    ) {
+        self.isEnabled = isEnabled
+        self.rules = rules
+    }
+
+    public var normalized: SimpleRoutingSettings {
+        SimpleRoutingSettings(
+            isEnabled: isEnabled,
+            rules: rules.map(\.normalized)
+        )
+    }
+
+    public var withoutDeprecatedNetworkRules: SimpleRoutingSettings {
+        SimpleRoutingSettings(
+            isEnabled: isEnabled,
+            rules: rules
+                .filter { !$0.kind.isDeprecatedNetworkRule }
+                .map(\.normalized)
+        )
+    }
+}
+
+public struct SimpleRoutingRule: Identifiable, Codable, Hashable, Sendable {
+    public var id: UUID
+    public var kind: SimpleRoutingRuleKind
+    public var target: SimpleRoutingTarget
+
+    public init(
+        id: UUID = UUID(),
+        kind: SimpleRoutingRuleKind,
+        target: SimpleRoutingTarget
+    ) {
+        self.id = id
+        self.kind = kind
+        self.target = target
+    }
+
+    public var normalized: SimpleRoutingRule {
+        SimpleRoutingRule(
+            id: id,
+            kind: kind.normalized,
+            target: target
+        )
+    }
+}
+
+public enum SimpleRoutingRuleKind: Hashable, Sendable {
+    case geoSite(selectors: [String])
+    case geoIP(selectors: [String])
+    case network(SimpleRoutingNetwork)
+
+    public var normalized: SimpleRoutingRuleKind {
+        switch self {
+        case let .geoSite(selectors):
+            return .geoSite(selectors: normalizeRoutingSelectors(selectors))
+        case let .geoIP(selectors):
+            return .geoIP(selectors: normalizeRoutingSelectors(selectors))
+        case let .network(network):
+            return .network(network)
+        }
+    }
+
+    public var isDeprecatedNetworkRule: Bool {
+        if case .network = self {
+            return true
+        }
+        return false
+    }
+}
+
+extension SimpleRoutingRuleKind: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case selectors
+        case network
+    }
+
+    private enum Kind: String, Codable {
+        case geoSite
+        case geoIP
+        case network
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(Kind.self, forKey: .kind)
+
+        switch kind {
+        case .geoSite:
+            self = .geoSite(selectors: try container.decodeIfPresent([String].self, forKey: .selectors) ?? [])
+        case .geoIP:
+            self = .geoIP(selectors: try container.decodeIfPresent([String].self, forKey: .selectors) ?? [])
+        case .network:
+            self = .network(try container.decode(SimpleRoutingNetwork.self, forKey: .network))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+
+        switch self {
+        case let .geoSite(selectors):
+            try container.encode(Kind.geoSite, forKey: .kind)
+            try container.encode(selectors, forKey: .selectors)
+        case let .geoIP(selectors):
+            try container.encode(Kind.geoIP, forKey: .kind)
+            try container.encode(selectors, forKey: .selectors)
+        case let .network(network):
+            try container.encode(Kind.network, forKey: .kind)
+            try container.encode(network, forKey: .network)
+        }
+    }
+}
+
+public enum SimpleRoutingTarget: String, Codable, CaseIterable, Sendable {
+    case proxy
+    case direct
+    case block
+}
+
+public enum SimpleRoutingNetwork: String, Codable, CaseIterable, Sendable {
+    case tcp
+    case udp
+    case tcpUDP
+}
+
 public struct ManualProfile: Identifiable, Hashable, Sendable {
     public var id: UUID
     public var name: String
@@ -1166,4 +1299,11 @@ private func classifyProfile(
     }
 
     return .standard
+}
+
+private func normalizeRoutingSelectors(_ selectors: [String]) -> [String] {
+    selectors.compactMap { selector in
+        let normalized = selector.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.isEmpty ? nil : normalized
+    }
 }

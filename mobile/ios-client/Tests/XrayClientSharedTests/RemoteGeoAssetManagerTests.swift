@@ -9,7 +9,7 @@ final class RemoteGeoAssetManagerTests: XCTestCase {
     }
 
     func testRemoteGeoAssetSettingsRoundTripThroughPreferencesStore() throws {
-        let appGroupStore = AppGroupStore(appGroupIdentifier: "tests.internet.\(UUID().uuidString.lowercased())")
+        let appGroupStore = makeTestAppGroupStore()
         let preferencesStore = ClientPreferencesStore(appGroupStore: appGroupStore)
         let settings = RemoteGeoAssetSettings(
             geoIPURLString: "https://example.com/geoip.dat",
@@ -204,7 +204,7 @@ private struct RemoteGeoAssetHarness {
 }
 
 private func makeHarness() -> RemoteGeoAssetHarness {
-    let appGroupStore = AppGroupStore(appGroupIdentifier: "tests.internet.\(UUID().uuidString.lowercased())")
+    let appGroupStore = makeTestAppGroupStore()
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [MockURLProtocol.self]
     let session = URLSession(configuration: configuration)

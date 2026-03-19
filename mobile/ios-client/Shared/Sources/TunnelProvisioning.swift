@@ -123,6 +123,7 @@ struct TunnelManagerSnapshot: Hashable, Sendable {
 enum TunnelReconciliationPolicy: Sendable {
     case ensurePresent
     case existingOnly
+    case inspectOnly
 }
 
 protocol TunnelPreferencesClient: AnyObject {
@@ -158,7 +159,32 @@ final class TunnelProvisioningController {
         let hadExistingManager = !matchingRecords.isEmpty
         var reprovisioned = false
 
-        if matchingRecords.count > 1 || forceReprovision {
+        if forceReprovision {
+            for record in matchingRecords {
+                try await client.removeRecord(record)
+            }
+            matchingRecords = []
+            reprovisioned = reprovisioned || hadExistingManager
+        }
+
+        if policy == .inspectOnly {
+            let record = matchingRecords.first
+            let isHealthy = matchingRecords.count == 1 && record.map(desiredConfiguration.matches) == true
+            return (
+                record,
+                TunnelManagerSnapshot(
+                    systemStatus: record?.systemStatus ?? .invalid,
+                    connectedDate: record?.connectedDate,
+                    hadExistingManager: hadExistingManager,
+                    reprovisioned: false,
+                    isHealthy: isHealthy,
+                    managerAvailable: record != nil,
+                    reconcileDurationMs: elapsedMilliseconds(since: reconcileStartedAt)
+                )
+            )
+        }
+
+        if matchingRecords.count > 1 {
             for record in matchingRecords {
                 try await client.removeRecord(record)
             }
@@ -172,17 +198,16 @@ final class TunnelProvisioningController {
                     nil,
                     TunnelManagerSnapshot(
                         systemStatus: .invalid,
-                    connectedDate: nil,
-                    hadExistingManager: hadExistingManager,
-                    reprovisioned: reprovisioned,
-                    isHealthy: false,
-                    managerAvailable: false,
-                    reconcileDurationMs: elapsedMilliseconds(since: reconcileStartedAt)
+                        connectedDate: nil,
+                        hadExistingManager: hadExistingManager,
+                        reprovisioned: reprovisioned,
+                        isHealthy: false,
+                        managerAvailable: false,
+                        reconcileDurationMs: elapsedMilliseconds(since: reconcileStartedAt)
+                    )
                 )
-            )
-        }
-
-        let created = desiredConfiguration.applying(to: client.makeRecord())
+            }
+            let created = desiredConfiguration.applying(to: client.makeRecord())
             let saved = try await client.saveRecord(created)
             return (
                 saved,
@@ -223,4 +248,28 @@ final class TunnelProvisioningController {
 private func elapsedMilliseconds(since start: DispatchTime) -> Int {
     let elapsedNs = DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
     return Int(elapsedNs / 1_000_000)
+}
+
+func persistedTunnelManagerIdentifier(from providerConfiguration: [String: Any]) -> String? {
+    guard let value = providerConfiguration[AppConfiguration.tunnelProviderConfigurationManagerIdentifierKey] as? String else {
+        return nil
+    }
+
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+}
+
+func tunnelManagerIdentifier(
+    from providerConfiguration: [String: Any],
+    bundleIdentifier: String?,
+    serverAddress: String?,
+    fallbackIndex: Int
+) -> String {
+    if let persistedIdentifier = persistedTunnelManagerIdentifier(from: providerConfiguration) {
+        return persistedIdentifier
+    }
+
+    let resolvedBundleIdentifier = bundleIdentifier ?? "unknown"
+    let resolvedServerAddress = serverAddress ?? ""
+    return "\(resolvedBundleIdentifier)|\(resolvedServerAddress)|\(fallbackIndex)"
 }

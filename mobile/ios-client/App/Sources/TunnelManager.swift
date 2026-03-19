@@ -34,13 +34,9 @@ final class TunnelManager {
         }
     }
 
-    func loadOrCreateManager() async throws -> TunnelManagerSnapshot {
-        try await reconcileForForeground()
-    }
-
-    func reconcileForForeground() async throws -> TunnelManagerSnapshot {
+    func inspectCurrentConfiguration() async throws -> TunnelManagerSnapshot {
         try await reconcile(
-            policy: .ensurePresent,
+            policy: .inspectOnly,
             forceReprovision: false,
             publishResult: true
         ).snapshot
@@ -277,6 +273,7 @@ private final class NetworkExtensionTunnelPreferencesClient: TunnelPreferencesCl
         proto.serverAddress = record.serverAddress
 
         var providerConfiguration: [String: Any] = [:]
+        providerConfiguration[AppConfiguration.tunnelProviderConfigurationManagerIdentifierKey] = record.identifier
         if let appGroupIdentifier = record.appGroupIdentifier {
             providerConfiguration[AppConfiguration.tunnelProviderConfigurationAppGroupKey] = appGroupIdentifier
         }
@@ -309,9 +306,13 @@ private final class NetworkExtensionTunnelPreferencesClient: TunnelPreferencesCl
         fallbackIndex: Int
     ) -> String {
         let proto = manager.protocolConfiguration as? NETunnelProviderProtocol
-        let bundleIdentifier = proto?.providerBundleIdentifier ?? "unknown"
-        let serverAddress = proto?.serverAddress ?? manager.localizedDescription ?? ""
-        return "\(bundleIdentifier)|\(serverAddress)|\(fallbackIndex)"
+        let providerConfiguration = proto?.providerConfiguration ?? [:]
+        return tunnelManagerIdentifier(
+            from: providerConfiguration,
+            bundleIdentifier: proto?.providerBundleIdentifier,
+            serverAddress: proto?.serverAddress ?? manager.localizedDescription,
+            fallbackIndex: fallbackIndex
+        )
     }
 
     private static func record(

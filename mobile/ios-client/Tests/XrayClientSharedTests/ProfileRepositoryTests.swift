@@ -69,7 +69,7 @@ final class ProfileRepositoryTests: XCTestCase {
     }
 
     func testActiveTunnelTargetPersistsAcrossRepositoryInstances() throws {
-        let appGroupStore = AppGroupStore(appGroupIdentifier: "tests.internet.\(UUID().uuidString.lowercased())")
+        let appGroupStore = makeTestAppGroupStore()
         let service = "tests.internet.service.\(UUID().uuidString.lowercased())"
         let repository = ProfileRepository(
             appGroupStore: appGroupStore,
@@ -92,9 +92,8 @@ private struct RepositoryHarness {
     let repository: ProfileRepository
 
     init() {
-        let appGroupIdentifier = "tests.internet.\(UUID().uuidString.lowercased())"
         let service = "tests.internet.service.\(UUID().uuidString.lowercased())"
-        appGroupStore = AppGroupStore(appGroupIdentifier: appGroupIdentifier)
+        appGroupStore = makeTestAppGroupStore()
         repository = ProfileRepository(
             appGroupStore: appGroupStore,
             keychainStore: KeychainStore(service: service, accessGroup: nil)

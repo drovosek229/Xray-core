@@ -11,12 +11,20 @@ private struct LocalRuntimeGeneration {
 private struct LocalRuntimeStartResult {
     let generation: LocalRuntimeGeneration
     let performance: TunnelPerformanceTimings
+    let hasDirectRules: Bool
+    let directEgressStatus: TunnelDirectEgressStatus?
 }
 
 private struct LocalRuntimeStartFailure: Error {
     let reason: TunnelLocalFailureReason
     let message: String
     let performance: TunnelPerformanceTimings
+}
+
+private struct PreparedRuntimeConfiguration {
+    let configJSON: String
+    let hasDirectRules: Bool
+    let directEgressStatus: TunnelDirectEgressStatus?
 }
 
 private struct ProviderSupervisorState {
@@ -29,6 +37,9 @@ private struct ProviderSupervisorState {
     var lastHealthyAt: Date?
     var healthCheckInFlight = false
     var healthTimer: DispatchSourceTimer?
+    var latestPathSnapshot: DirectEgressPathSnapshot?
+    var hasActiveDirectRules = false
+    var currentDirectEgressStatus: TunnelDirectEgressStatus?
 }
 
 final class PacketTunnelProvider: NEPacketTunnelProvider {
@@ -124,7 +135,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 lastKnownSystemStatus: .disconnected,
                 recoveryAttempt: previousState?.recoveryAttempt,
                 lastRecoveryTrigger: previousState?.lastRecoveryTrigger,
-                lastHealthyAt: previousState?.lastHealthyAt
+                lastHealthyAt: previousState?.lastHealthyAt,
+                directEgressStatus: previousState?.directEgressStatus
             )
         )
         logStore.append("Tunnel stopped with reason \(stopReason.rawValue)")
@@ -188,7 +200,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                         performance: result.performance,
                         lastKnownSystemStatus: .connected,
                         recoveryAttempt: 0,
-                        lastHealthyAt: startedAt
+                        lastHealthyAt: startedAt,
+                        directEgressStatus: result.directEgressStatus
                     )
                     self.logStore.append(
                         "Tunnel started with \(providerConfiguration.targetName) "
@@ -235,6 +248,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     ) throws -> LocalRuntimeStartResult {
         stopCurrentRuntimeLocked()
 
+        let preparedRuntimeConfiguration = try makePreparedRuntimeConfiguration(for: providerConfiguration)
         let bridge = XrayEngineBridge()
         let tun2Socks = Tun2SocksBridge()
         let generation = LocalRuntimeGeneration(
@@ -247,7 +261,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let validateStartedAt = DispatchTime.now()
         do {
-            try bridge.validate(configJSON: providerConfiguration.runtimeConfigJSON)
+            try bridge.validate(configJSON: preparedRuntimeConfiguration.configJSON)
         } catch {
             performance.configValidateMs = Self.elapsedMilliseconds(since: validateStartedAt)
             throw LocalRuntimeStartFailure(
@@ -277,7 +291,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let engineStartedAt = DispatchTime.now()
         do {
             try bridge.start(
-                configJSON: providerConfiguration.runtimeConfigJSON,
+                configJSON: preparedRuntimeConfiguration.configJSON,
                 tunFD: -1,
                 assetDir: assetDir
             )
@@ -320,13 +334,36 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         supervisorState.currentGeneration = generation
         supervisorState.activeConfiguration = providerConfiguration
+        supervisorState.hasActiveDirectRules = preparedRuntimeConfiguration.hasDirectRules
+        supervisorState.currentDirectEgressStatus = preparedRuntimeConfiguration.directEgressStatus
         if runtimeStage == .recovery {
             supervisorState.isRecovering = true
         }
 
         return LocalRuntimeStartResult(
             generation: generation,
-            performance: performance
+            performance: performance,
+            hasDirectRules: preparedRuntimeConfiguration.hasDirectRules,
+            directEgressStatus: preparedRuntimeConfiguration.directEgressStatus
+        )
+    }
+
+    private func makePreparedRuntimeConfiguration(
+        for providerConfiguration: TunnelProviderConfigurationEnvelope
+    ) throws -> PreparedRuntimeConfiguration {
+        let preferredPathSnapshot = currentDirectEgressPathSnapshot()
+        supervisorState.latestPathSnapshot = preferredPathSnapshot
+
+        let plannedDirectEgressStatus = DirectEgressPlanner.plan(for: preferredPathSnapshot)
+        let patchedRuntimeConfiguration = try DirectEgressRuntimeConfigPatcher.patch(
+            runtimeConfigJSON: providerConfiguration.runtimeConfigJSON,
+            directEgressStatus: plannedDirectEgressStatus
+        )
+
+        return PreparedRuntimeConfiguration(
+            configJSON: patchedRuntimeConfiguration.configJSON,
+            hasDirectRules: patchedRuntimeConfiguration.hasDirectRules,
+            directEgressStatus: patchedRuntimeConfiguration.directEgressStatus
         )
     }
 
@@ -379,7 +416,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             lastKnownSystemStatus: .connected,
             recoveryAttempt: 0,
             lastRecoveryTrigger: trigger,
-            lastHealthyAt: supervisorState.lastHealthyAt
+            lastHealthyAt: supervisorState.lastHealthyAt,
+            directEgressStatus: supervisorState.currentDirectEgressStatus
         )
         logStore.append("Starting local runtime recovery for \(providerConfiguration.targetName): \(message)")
         scheduleNextRecoveryAttemptLocked(for: providerConfiguration, lastTrigger: trigger)
@@ -408,7 +446,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             lastKnownSystemStatus: .connected,
             recoveryAttempt: attempt,
             lastRecoveryTrigger: lastTrigger,
-            lastHealthyAt: supervisorState.lastHealthyAt
+            lastHealthyAt: supervisorState.lastHealthyAt,
+            directEgressStatus: supervisorState.currentDirectEgressStatus
         )
 
         stateQueue.asyncAfter(deadline: .now() + backoff) { [weak self] in
@@ -455,7 +494,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 lastKnownSystemStatus: .connected,
                 recoveryAttempt: 0,
                 lastRecoveryTrigger: trigger,
-                lastHealthyAt: now
+                lastHealthyAt: now,
+                directEgressStatus: result.directEgressStatus
             )
             logStore.append("Recovered local runtime for \(providerConfiguration.targetName) on attempt \(attempt).")
         } catch let failure as LocalRuntimeStartFailure {
@@ -470,7 +510,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 lastKnownSystemStatus: .connected,
                 recoveryAttempt: attempt,
                 lastRecoveryTrigger: failure.reason,
-                lastHealthyAt: supervisorState.lastHealthyAt
+                lastHealthyAt: supervisorState.lastHealthyAt,
+                directEgressStatus: supervisorState.currentDirectEgressStatus
             )
             scheduleNextRecoveryAttemptLocked(for: providerConfiguration, lastTrigger: failure.reason)
         } catch {
@@ -524,7 +565,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                             lastError: nil,
                             lastKnownSystemStatus: .connected,
                             recoveryAttempt: 0,
-                            lastHealthyAt: now
+                            lastHealthyAt: now,
+                            directEgressStatus: self.supervisorState.currentDirectEgressStatus
                         )
                         return
                     }
@@ -562,7 +604,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             lastKnownSystemStatus: .disconnecting,
             recoveryAttempt: supervisorState.recoveryAttempt,
             lastRecoveryTrigger: reason,
-            lastHealthyAt: supervisorState.lastHealthyAt
+            lastHealthyAt: supervisorState.lastHealthyAt,
+            directEgressStatus: supervisorState.currentDirectEgressStatus
         )
         logStore.append("Tearing down tunnel after recovery failure: \(message)")
         cancelTunnelWithError(
@@ -572,6 +615,103 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 userInfo: [NSLocalizedDescriptionKey: message]
             )
         )
+    }
+
+    private func handleNetworkPathUpdate(_ path: Network.NWPath) {
+        let snapshot = currentDirectEgressPathSnapshot(fallbackPath: path)
+        logStore.append("Network path update: \(snapshot.logDescription)")
+
+        stateQueue.async {
+            self.supervisorState.latestPathSnapshot = snapshot
+
+            guard !self.supervisorState.isStopping else {
+                return
+            }
+            guard let providerConfiguration = self.supervisorState.activeConfiguration else {
+                return
+            }
+
+            let hasDirectRules = self.supervisorState.hasActiveDirectRules
+                || DirectEgressRuntimeConfigPatcher.hasDirectRules(in: providerConfiguration.runtimeConfigJSON)
+            guard hasDirectRules else {
+                return
+            }
+
+            let nextDirectEgressStatus = DirectEgressPlanner.plan(for: snapshot)
+            guard self.supervisorState.currentDirectEgressStatus != nextDirectEgressStatus else {
+                return
+            }
+
+            self.logStore.append("Direct egress updated to \(nextDirectEgressStatus.logDescription)")
+            self.refreshRuntimeForDirectEgressChangeLocked(
+                for: providerConfiguration,
+                nextDirectEgressStatus: nextDirectEgressStatus
+            )
+        }
+    }
+
+    private func refreshRuntimeForDirectEgressChangeLocked(
+        for providerConfiguration: TunnelProviderConfigurationEnvelope,
+        nextDirectEgressStatus: TunnelDirectEgressStatus
+    ) {
+        guard !supervisorState.isStopping else {
+            return
+        }
+        guard !supervisorState.isRecovering else {
+            supervisorState.currentDirectEgressStatus = nextDirectEgressStatus
+            writeRuntimeState(
+                for: providerConfiguration,
+                phase: .recovering,
+                runtimeStage: .recovery,
+                lastError: nil,
+                lastKnownSystemStatus: .connected,
+                recoveryAttempt: supervisorState.recoveryAttempt,
+                lastHealthyAt: supervisorState.lastHealthyAt,
+                directEgressStatus: nextDirectEgressStatus
+            )
+            return
+        }
+        guard supervisorState.currentGeneration != nil else {
+            supervisorState.currentDirectEgressStatus = nextDirectEgressStatus
+            return
+        }
+
+        stopHealthMonitorLocked()
+
+        do {
+            let result = try startFreshLocalRuntime(
+                for: providerConfiguration,
+                runtimeStage: .steadyState
+            )
+            let now = Date()
+            supervisorState.lastHealthyAt = now
+            supervisorState.hasEverConnected = true
+            startHealthMonitorLocked()
+            writeRuntimeState(
+                for: providerConfiguration,
+                phase: .connected,
+                runtimeStage: .steadyState,
+                lastError: nil,
+                performance: result.performance,
+                lastKnownSystemStatus: .connected,
+                recoveryAttempt: 0,
+                lastHealthyAt: now,
+                directEgressStatus: result.directEgressStatus
+            )
+            logStore.append("Refreshed local runtime for direct egress \(nextDirectEgressStatus.logDescription)")
+        } catch let failure as LocalRuntimeStartFailure {
+            logStore.append("Direct egress refresh failed: \(failure.message)")
+            beginRecovery(
+                trigger: failure.reason,
+                message: failure.message
+            )
+        } catch {
+            logStore.append("Direct egress refresh failed: \(error.localizedDescription)")
+            beginRecovery(
+                trigger: .xrayStartFailed,
+                message: error.localizedDescription
+            )
+        }
     }
 
     private func startHealthMonitorLocked() {
@@ -608,23 +748,32 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         let monitor = NWPathMonitor()
+        stateQueue.async {
+            self.supervisorState.latestPathSnapshot = self.currentDirectEgressPathSnapshot(
+                fallbackPath: monitor.currentPath
+            )
+        }
         monitor.pathUpdateHandler = { [weak self] path in
-            let status: String
-            switch path.status {
-            case .satisfied:
-                status = "satisfied"
-            case .requiresConnection:
-                status = "requires-connection"
-            case .unsatisfied:
-                status = "unsatisfied"
-            @unknown default:
-                status = "unknown"
-            }
-            let interfaces = path.availableInterfaces.map(\.debugDescription).joined(separator: ",")
-            self?.logStore.append("Network path update: \(status) [\(interfaces)]")
+            self?.handleNetworkPathUpdate(path)
         }
         monitor.start(queue: pathMonitorQueue)
         pathMonitor = monitor
+    }
+
+    private func currentDirectEgressPathSnapshot(fallbackPath: Network.NWPath? = nil) -> DirectEgressPathSnapshot {
+        if let fallbackPath {
+            return DirectEgressPathSnapshot(path: fallbackPath)
+        }
+
+        if let latestPathSnapshot = supervisorState.latestPathSnapshot {
+            return latestPathSnapshot
+        }
+
+        return DirectEgressPathSnapshot(
+            status: .unknown,
+            availableInterfaces: [],
+            activeInterfaceTypes: []
+        )
     }
 
     private func stopPathMonitor() {
@@ -700,7 +849,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         lastKnownSystemStatus: TunnelSystemStatus,
         recoveryAttempt: Int? = nil,
         lastRecoveryTrigger: TunnelLocalFailureReason? = nil,
-        lastHealthyAt: Date? = nil
+        lastHealthyAt: Date? = nil,
+        directEgressStatus: TunnelDirectEgressStatus? = nil
     ) {
         do {
             try tunnelSessionStore.updateRuntimeState { state in
@@ -721,6 +871,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 state.recoveryAttempt = recoveryAttempt ?? state.recoveryAttempt
                 state.lastRecoveryTrigger = lastRecoveryTrigger ?? state.lastRecoveryTrigger
                 state.lastHealthyAt = lastHealthyAt ?? state.lastHealthyAt
+                state.directEgressStatus = directEgressStatus
                 if let performance {
                     var merged = state.performance ?? TunnelPerformanceTimings()
                     merged.merge(from: performance)
@@ -743,7 +894,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     lastKnownSystemStatus: lastKnownSystemStatus,
                     recoveryAttempt: recoveryAttempt,
                     lastRecoveryTrigger: lastRecoveryTrigger,
-                    lastHealthyAt: lastHealthyAt
+                    lastHealthyAt: lastHealthyAt,
+                    directEgressStatus: directEgressStatus
                 )
             )
         }

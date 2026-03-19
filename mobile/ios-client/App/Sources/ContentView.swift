@@ -394,6 +394,14 @@ private struct HomeView: View {
                 text: displayedTunnelStatus,
                 isConnected: model.tunnelPhase == .connected
             )
+
+            if let failureDetail = displayedTunnelFailureDetail {
+                Text(failureDetail)
+                    .font(.system(size: 11, weight: .regular, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 240)
+            }
         }
         .frame(maxWidth: .infinity)
     }
@@ -498,6 +506,20 @@ private struct HomeView: View {
         return model.tunnelStatus
     }
 
+    private var displayedTunnelFailureDetail: String? {
+        guard model.tunnelPhase == .failed else {
+            return nil
+        }
+
+        guard let lastError = model.tunnelRuntimeState?.lastError?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !lastError.isEmpty
+        else {
+            return nil
+        }
+
+        return lastError
+    }
+
     private var powerButtonSymbol: String {
         if model.tunnelPhase == .recovering {
             return "hourglass"
@@ -554,6 +576,12 @@ private struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("Enabled", isOn: $model.simpleRoutingSettings.isEnabled)
+
+                    Button("Apply Russia Preset") {
+                        model.applyRussiaRoutingPreset()
+                    }
+
                     TextField("GeoIP URL", text: $model.remoteGeoAssetSettings.geoIPURLString)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -564,10 +592,6 @@ private struct SettingsView: View {
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
                         .textContentType(.URL)
-
-                    Button("Save Settings") {
-                        model.saveRemoteGeoAssetSettings()
-                    }
 
                     Button {
                         Task {
@@ -582,12 +606,35 @@ private struct SettingsView: View {
                     }
                     .disabled(model.isRefreshingRemoteGeoAssets || !model.remoteGeoAssetSettings.hasAnyConfiguredAssets)
 
+                    if model.simpleRoutingSettings.rules.isEmpty {
+                        Text("No routing rules yet.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach($model.simpleRoutingSettings.rules) { $rule in
+                            RoutingRuleEditorRow(
+                                rule: $rule,
+                                onDelete: { model.deleteRoutingRule(id: rule.id) }
+                            )
+                        }
+                        .onMove(perform: model.moveRoutingRules)
+                    }
+
+                    Button {
+                        model.addRoutingRule()
+                    } label: {
+                        Label("Add Rule", systemImage: "plus")
+                    }
+
+                    Button("Save") {
+                        model.saveRoutingConfiguration()
+                    }
+
                     geoAssetStatusView(kind: .geoIP, status: model.remoteGeoAssetRefreshState.geoIP)
                     geoAssetStatusView(kind: .geoSite, status: model.remoteGeoAssetRefreshState.geoSite)
                 } header: {
-                    Text("Geo Assets")
+                    Text("Routing")
                 } footer: {
-                    Text("Remote geo assets are optional. Saving only updates shared settings. Tunnel reconnect is still manual.")
+                    Text("Saving updates the app-wide routing rules and geo asset URLs together. It does not reconnect the tunnel.")
                 }
 
                 Section("Diagnostics") {
@@ -617,6 +664,11 @@ private struct SettingsView: View {
 
                     Button(action: onShowLogs) {
                         Label("Open Logs", systemImage: "doc.text")
+                    }
+
+                    if let directEgressStatus = model.tunnelRuntimeState?.directEgressStatus,
+                       model.tunnelPhase == .connected || model.tunnelPhase == .recovering || model.tunnelPhase == .starting {
+                        directEgressStatusView(status: directEgressStatus)
                     }
 
                     if let benchmark = model.latestBenchmarkResult {
@@ -662,6 +714,9 @@ private struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .toolbar {
+                EditButton()
+            }
         }
     }
 
@@ -690,6 +745,126 @@ private struct SettingsView: View {
         }
         .padding(.vertical, 2)
     }
+
+    @ViewBuilder
+    private func directEgressStatusView(status: TunnelDirectEgressStatus) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Direct Egress")
+                .font(.subheadline.weight(.semibold))
+            Text(status.summaryText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let detailText = status.detailText, !detailText.isEmpty {
+                Text(detailText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct RoutingRuleEditorRow: View {
+    @Binding var rule: SimpleRoutingRule
+
+    @State private var selectorsText: String
+
+    let onDelete: () -> Void
+
+    init(
+        rule: Binding<SimpleRoutingRule>,
+        onDelete: @escaping () -> Void
+    ) {
+        self._rule = rule
+        self.onDelete = onDelete
+        self._selectorsText = State(initialValue: Self.joinedSelectors(for: rule.wrappedValue.kind))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Rule Type", selection: ruleTypeBinding) {
+                ForEach(SimpleRoutingRuleEditorKind.allCases) { kind in
+                    Text(kind.rawValue).tag(kind)
+                }
+            }
+
+            switch rule.kind {
+            case .geoSite, .geoIP:
+                TextField("Comma-separated selectors", text: $selectorsText)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .onChange(of: selectorsText) { _, newValue in
+                        let selectors = Self.parseSelectors(from: newValue)
+                        switch rule.kind {
+                        case .geoSite:
+                            rule.kind = .geoSite(selectors: selectors)
+                        case .geoIP:
+                            rule.kind = .geoIP(selectors: selectors)
+                        case .network:
+                            break
+                        }
+                    }
+            case .network:
+                Text("This deprecated rule type will be removed when you save.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Picker("Target", selection: $rule.target) {
+                ForEach(SimpleRoutingTarget.allCases, id: \.self) { target in
+                    Text(target.displayName).tag(target)
+                }
+            }
+
+            Button(role: .destructive, action: onDelete) {
+                Label("Delete Rule", systemImage: "trash")
+            }
+        }
+        .padding(.vertical, 4)
+        .onChange(of: rule.kind) { _, newValue in
+            let updatedSelectorsText = Self.joinedSelectors(for: newValue)
+            if selectorsText != updatedSelectorsText {
+                selectorsText = updatedSelectorsText
+            }
+        }
+    }
+
+    private var ruleTypeBinding: Binding<SimpleRoutingRuleEditorKind> {
+        Binding {
+            rule.kind.editorKind
+        } set: { newValue in
+            switch newValue {
+            case .geoSite:
+                rule.kind = .geoSite(selectors: Self.parseSelectors(from: selectorsText))
+            case .geoIP:
+                rule.kind = .geoIP(selectors: Self.parseSelectors(from: selectorsText))
+            }
+        }
+    }
+
+    private static func joinedSelectors(for kind: SimpleRoutingRuleKind) -> String {
+        switch kind {
+        case let .geoSite(selectors):
+            return selectors.joined(separator: ", ")
+        case let .geoIP(selectors):
+            return selectors.joined(separator: ", ")
+        case .network:
+            return ""
+        }
+    }
+
+    private static func parseSelectors(from value: String) -> [String] {
+        value.split(separator: ",", omittingEmptySubsequences: false)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+}
+
+private enum SimpleRoutingRuleEditorKind: String, CaseIterable, Identifiable {
+    case geoSite = "GeoSite"
+    case geoIP = "GeoIP"
+
+    var id: String { rawValue }
 }
 
 private func benchmarkMetric(_ value: Int?) -> String {
@@ -705,6 +880,45 @@ private let geoAssetDateFormatter: DateFormatter = {
     formatter.timeStyle = .short
     return formatter
 }()
+
+private extension SimpleRoutingRuleKind {
+    var editorKind: SimpleRoutingRuleEditorKind {
+        switch self {
+        case .geoSite:
+            return .geoSite
+        case .geoIP:
+            return .geoIP
+        case .network:
+            return .geoSite
+        }
+    }
+}
+
+private extension SimpleRoutingTarget {
+    var displayName: String {
+        switch self {
+        case .proxy:
+            return "Proxy"
+        case .direct:
+            return "Direct"
+        case .block:
+            return "Block"
+        }
+    }
+}
+
+private extension SimpleRoutingNetwork {
+    var displayName: String {
+        switch self {
+        case .tcp:
+            return "TCP"
+        case .udp:
+            return "UDP"
+        case .tcpUDP:
+            return "TCP + UDP"
+        }
+    }
+}
 
 private struct ManualProfileEditorView: View {
     @Environment(\.dismiss) private var dismiss
