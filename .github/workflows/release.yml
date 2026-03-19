@@ -146,12 +146,6 @@ jobs:
         run: |
           cp resources/geoip.dat build_assets/
           cp resources/geosite.dat build_assets/
-          cp README.md build_assets/
-          cp LICENSE build_assets/
-          printf 'target=%s\nrelease=%s\ncommit=%s\n' \
-            "${{ matrix.asset_name }}" \
-            "${RELEASE_TAG}" \
-            "$(git rev-parse HEAD)" > build_assets/BUILD_INFO.txt
 
       - name: Create archive
         run: |
