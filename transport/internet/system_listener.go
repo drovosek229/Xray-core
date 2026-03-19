@@ -2,6 +2,8 @@ package internet
 
 import (
 	"context"
+	stderrors "errors"
+	stdnet "net"
 	"os"
 	"runtime"
 	"strconv"
@@ -58,15 +60,46 @@ func (l *UnixListenerWrapper) Accept() (net.Conn, error) {
 }
 
 func (l *UnixListenerWrapper) Close() error {
+	err := l.UnixListener.Close()
 	if l.locker != nil {
 		l.locker.Release()
 		l.locker = nil
 	}
-	return l.UnixListener.Close()
+	return err
 }
 
 type UnixConnWrapper struct {
 	*net.UnixConn
+}
+
+func cleanupStaleUnixSocket(address string) error {
+	info, err := os.Lstat(address)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return errors.New("failed to inspect unix domain socket: ", address).Base(err)
+	}
+
+	if info.Mode()&os.ModeSocket == 0 {
+		return errors.New("unix domain socket path is not a socket: ", address)
+	}
+
+	conn, err := stdnet.DialTimeout("unix", address, 200*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		return errors.New("unix domain socket is already in use: ", address)
+	}
+
+	if !stderrors.Is(err, syscall.ECONNREFUSED) && !stderrors.Is(err, syscall.ENOENT) {
+		return errors.New("failed to probe unix domain socket: ", address).Base(err)
+	}
+
+	if err := os.Remove(address); err != nil && !os.IsNotExist(err) {
+		return errors.New("failed to remove stale unix domain socket: ", address).Base(err)
+	}
+
+	return nil
 }
 
 func (conn *UnixConnWrapper) RemoteAddr() net.Addr {
@@ -143,6 +176,10 @@ func (dl *DefaultListener) Listen(ctx context.Context, addr net.Addr, sockopt *S
 				path: address + ".lock",
 			}
 			if err := locker.Acquire(); err != nil {
+				return nil, err
+			}
+			if err := cleanupStaleUnixSocket(address); err != nil {
+				locker.Release()
 				return nil, err
 			}
 
