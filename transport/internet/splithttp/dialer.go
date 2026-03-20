@@ -754,11 +754,13 @@ func (w uploadWriter) Write(b []byte) (int, error) {
 
 	var writed int
 	for _, buff := range buffer.MultiBuffer {
+		writeLen := int(buff.Len())
+		// WriteMultiBuffer takes ownership of buff; don't read or mutate it after the handoff.
 		err := w.WriteMultiBuffer(buf.MultiBuffer{buff})
 		if err != nil {
 			return writed, err
 		}
-		writed += int(buff.Len())
+		writed += writeLen
 	}
 	return writed, nil
 }

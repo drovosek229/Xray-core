@@ -48,7 +48,11 @@ func randStringFromCharset(n int, charset string) (string, bool) {
 	result := make([]byte, n)
 	i := 0
 
-	buf := make([]byte, 256)
+	var localBuf [32]byte
+	buf := localBuf[:]
+	if n > len(buf) {
+		buf = make([]byte, min(256, max(64, n*2)))
+	}
 	for i < n {
 		if _, err := rand.Read(buf); err != nil {
 			return "", false
@@ -84,6 +88,9 @@ func GenerateTokenishPaddingBase62(targetHuffmanBytes int) string {
 	randBase62Str, ok := randStringFromCharset(n, charsetBase62)
 	if !ok {
 		return ""
+	}
+	if targetHuffmanBytes <= 16 {
+		return randBase62Str
 	}
 
 	const maxIter = 150

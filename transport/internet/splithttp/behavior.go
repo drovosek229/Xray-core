@@ -21,6 +21,31 @@ type requestPersona struct {
 	extraHeaders       map[string]string
 }
 
+var balancedRequestPersonas = [...]requestPersona{
+	{
+		accept:            "*/*",
+		uploadContentType: "application/octet-stream",
+		extraHeaders: map[string]string{
+			"Accept-Language": "en-US,en;q=0.9",
+		},
+	},
+	{
+		accept:            "text/event-stream",
+		uploadContentType: "application/octet-stream",
+		extraHeaders: map[string]string{
+			"Cache-Control": "no-cache",
+		},
+	},
+	{
+		accept:             "text/plain, */*;q=0.5",
+		uploadContentType:  "text/plain; charset=UTF-8",
+		directQueryPadding: true,
+		extraHeaders: map[string]string{
+			"Accept-Language": "en-US,en;q=0.7",
+		},
+	},
+}
+
 type RequestBehavior struct {
 	mu                 sync.Mutex
 	header             http.Header
@@ -61,32 +86,7 @@ func (c *Config) NewRequestBehavior(httpVersion string) *RequestBehavior {
 		return nil
 	}
 
-	personas := []requestPersona{
-		{
-			accept:            "*/*",
-			uploadContentType: "application/octet-stream",
-			extraHeaders: map[string]string{
-				"Accept-Language": "en-US,en;q=0.9",
-			},
-		},
-		{
-			accept:            "text/event-stream",
-			uploadContentType: "application/octet-stream",
-			extraHeaders: map[string]string{
-				"Cache-Control": "no-cache",
-			},
-		},
-		{
-			accept:             "text/plain, */*;q=0.5",
-			uploadContentType:  "text/plain; charset=UTF-8",
-			directQueryPadding: true,
-			extraHeaders: map[string]string{
-				"Accept-Language": "en-US,en;q=0.7",
-			},
-		},
-	}
-
-	persona := personas[int(crypto.RandBetween(0, int64(len(personas))))]
+	persona := balancedRequestPersonas[int(crypto.RandBetween(0, int64(len(balancedRequestPersonas))))]
 	header := c.GetRequestHeader()
 	if header.Get("Accept") == "" && persona.accept != "" {
 		header.Set("Accept", persona.accept)
@@ -122,8 +122,6 @@ func (b *RequestBehavior) Header() http.Header {
 	if b == nil {
 		return nil
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	return cloneHeader(b.header)
 }
 
@@ -131,8 +129,6 @@ func (b *RequestBehavior) UploadContentType() string {
 	if b == nil {
 		return ""
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	return b.uploadContentType
 }
 
@@ -140,8 +136,6 @@ func (b *RequestBehavior) UseDirectQueryPadding() bool {
 	if b == nil {
 		return false
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	return b.directQueryPadding
 }
 
@@ -218,8 +212,8 @@ func (b *RequestBehavior) NextUploadSize(bounds RangeConfig, pending int32) int3
 	if b != nil {
 		b.mu.Lock()
 		lastChunkLen := b.observedChunkLen
-		httpVersion := b.httpVersion
 		b.mu.Unlock()
+		httpVersion := b.httpVersion
 
 		switch httpVersion {
 		case "1.1":
