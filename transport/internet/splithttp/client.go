@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/signal/done"
@@ -118,8 +117,14 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 		}
 		behavior.RecordUpload(int32(contentLength), time.Since(startedAt))
 	} else {
-		requestBuff := new(bytes.Buffer)
-		common.Must(req.Write(requestBuff))
+		var bufferedRequest []byte
+		if req.Body != nil && req.GetBody == nil {
+			bufferedRequest, err = buildHTTPRequestBytes(req)
+			if err != nil {
+				c.closed.Store(true)
+				return err
+			}
+		}
 
 		c.h1UploadMu.Lock()
 		defer c.h1UploadMu.Unlock()
@@ -140,7 +145,33 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 			}
 
 			startedAt := time.Now()
-			if _, err := h1UploadConn.Write(requestBuff.Bytes()); err != nil {
+			if bufferedRequest != nil {
+				if _, err := h1UploadConn.ReqBufWriter.Write(bufferedRequest); err != nil {
+					c.closeH1UploadConn()
+					if attempt == 0 {
+						continue
+					}
+					c.closed.Store(true)
+					return err
+				}
+			} else {
+				if attempt > 0 && req.GetBody != nil {
+					req.Body, err = req.GetBody()
+					if err != nil {
+						c.closed.Store(true)
+						return err
+					}
+				}
+				if err := req.Write(h1UploadConn.ReqBufWriter); err != nil {
+					c.closeH1UploadConn()
+					if attempt == 0 {
+						continue
+					}
+					c.closed.Store(true)
+					return err
+				}
+			}
+			if err := h1UploadConn.ReqBufWriter.Flush(); err != nil {
 				c.closeH1UploadConn()
 				if attempt == 0 {
 					continue
@@ -175,6 +206,14 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 	}
 
 	return nil
+}
+
+func buildHTTPRequestBytes(req *http.Request) ([]byte, error) {
+	requestBuff := bytes.NewBuffer(nil)
+	if err := req.Write(requestBuff); err != nil {
+		return nil, err
+	}
+	return requestBuff.Bytes(), nil
 }
 
 type HTTPStatusError struct {
@@ -224,38 +263,74 @@ func (c *DefaultDialerClient) closeH1UploadConn() {
 }
 
 type WaitReadCloser struct {
-	Wait chan struct{}
-	io.ReadCloser
+	Wait      chan struct{}
+	readyOnce sync.Once
+	mu        sync.Mutex
+	reader    io.ReadCloser
+	closed    bool
 }
 
 func (w *WaitReadCloser) Set(rc io.ReadCloser) {
-	w.ReadCloser = rc
-	defer func() {
-		if recover() != nil {
-			rc.Close()
-		}
-	}()
-	close(w.Wait)
+	var toClose io.ReadCloser
+	var signalReady bool
+
+	w.mu.Lock()
+	switch {
+	case w.closed || w.reader != nil:
+		toClose = rc
+	case rc == nil:
+		w.closed = true
+		signalReady = true
+	default:
+		w.reader = rc
+		signalReady = true
+	}
+	w.mu.Unlock()
+
+	if signalReady {
+		w.signalReady()
+	}
+	if toClose != nil {
+		_ = toClose.Close()
+	}
 }
 
 func (w *WaitReadCloser) Read(b []byte) (int, error) {
-	if w.ReadCloser == nil {
-		if <-w.Wait; w.ReadCloser == nil {
-			return 0, io.ErrClosedPipe
-		}
+	if w.Wait != nil {
+		<-w.Wait
 	}
-	return w.ReadCloser.Read(b)
+
+	w.mu.Lock()
+	reader := w.reader
+	w.mu.Unlock()
+	if reader == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return reader.Read(b)
 }
 
 func (w *WaitReadCloser) Close() error {
-	if w.ReadCloser != nil {
-		return w.ReadCloser.Close()
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return nil
 	}
-	defer func() {
-		if recover() != nil && w.ReadCloser != nil {
-			w.ReadCloser.Close()
-		}
-	}()
-	close(w.Wait)
+	w.closed = true
+	reader := w.reader
+	w.mu.Unlock()
+
+	w.signalReady()
+	if reader != nil {
+		return reader.Close()
+	}
 	return nil
+}
+
+func (w *WaitReadCloser) signalReady() {
+	if w.Wait == nil {
+		return
+	}
+	w.readyOnce.Do(func() {
+		close(w.Wait)
+	})
 }

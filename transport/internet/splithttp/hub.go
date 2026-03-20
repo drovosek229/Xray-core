@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +38,9 @@ type requestHandler struct {
 	sessions       sync.Map
 	localAddr      net.Addr
 	socketSettings *internet.SocketConfig
+	closeOnce      sync.Once
+	closeCh        chan struct{}
+	reaperOnce     sync.Once
 }
 
 type httpSession struct {
@@ -54,6 +56,8 @@ type httpSession struct {
 	idleTimeout      time.Duration
 	closeOnce        sync.Once
 }
+
+const sessionSweepInterval = 500 * time.Millisecond
 
 func newHTTPSession(config *Config) *httpSession {
 	session := &httpSession{
@@ -85,7 +89,86 @@ func (s *httpSession) close() {
 	})
 }
 
+func (s *httpSession) expiredAt(now time.Time) bool {
+	if !s.isFullyConnected.Done() {
+		return s.openTimeout > 0 && now.Sub(s.createdAt) >= s.openTimeout
+	}
+	return s.idleTimeout > 0 && now.Sub(s.lastTouchedAt()) >= s.idleTimeout
+}
+
+func (h *requestHandler) ensureReaper() {
+	h.reaperOnce.Do(func() {
+		if h.closeCh == nil {
+			h.closeCh = make(chan struct{})
+		}
+
+		go func() {
+			ticker := time.NewTicker(sessionSweepInterval)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ticker.C:
+					now := time.Now()
+					h.sessions.Range(func(key, value any) bool {
+						session := value.(*httpSession)
+						if session.expiredAt(now) {
+							h.sessions.Delete(key)
+							session.close()
+						}
+						return true
+					})
+				case <-h.closeCh:
+					return
+				}
+			}
+		}()
+	})
+}
+
+func (h *requestHandler) close() {
+	h.closeOnce.Do(func() {
+		if h.closeCh != nil {
+			close(h.closeCh)
+		}
+		h.sessions.Range(func(key, value any) bool {
+			h.sessions.Delete(key)
+			value.(*httpSession).close()
+			return true
+		})
+	})
+}
+
+func joinPayloadParts(parts ...[]byte) []byte {
+	total := 0
+	var single []byte
+	nonEmpty := 0
+	for _, part := range parts {
+		if len(part) == 0 {
+			continue
+		}
+		total += len(part)
+		single = part
+		nonEmpty++
+	}
+	switch nonEmpty {
+	case 0:
+		return nil
+	case 1:
+		return single
+	}
+
+	payload := make([]byte, total)
+	offset := 0
+	for _, part := range parts {
+		offset += copy(payload[offset:], part)
+	}
+	return payload
+}
+
 func (h *requestHandler) upsertSession(sessionId string) *httpSession {
+	h.ensureReaper()
+
 	// fast path
 	currentSessionAny, ok := h.sessions.Load(sessionId)
 	if ok {
@@ -108,31 +191,6 @@ func (h *requestHandler) upsertSession(sessionId string) *httpSession {
 	s := newHTTPSession(h.ln.config)
 
 	h.sessions.Store(sessionId, s)
-
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		for {
-			<-ticker.C
-			now := time.Now()
-			if !s.isFullyConnected.Done() {
-				if s.openTimeout > 0 && now.Sub(s.createdAt) >= s.openTimeout {
-					h.sessions.Delete(sessionId)
-					s.close()
-					return
-				}
-			} else {
-				if s.idleTimeout <= 0 {
-					return
-				}
-				if now.Sub(s.lastTouchedAt()) >= s.idleTimeout {
-					h.sessions.Delete(sessionId)
-					s.close()
-					return
-				}
-			}
-		}
-	}()
 
 	return s
 }
@@ -351,7 +409,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			}
 		}
 
-		payload := slices.Concat(headerPayload, cookiePayload, bodyPayload)
+		payload := joinPayloadParts(headerPayload, cookiePayload, bodyPayload)
 
 		if len(payload) > scMaxEachPostBytes {
 			errors.LogInfo(context.Background(), "Too large upload. scMaxEachPostBytes is set to ", scMaxEachPostBytes, "but request size exceed it. Adjust scMaxEachPostBytes on the server to be at least as large as client.")
@@ -476,6 +534,7 @@ type Listener struct {
 	listener   net.Listener
 	h3listener *quic.EarlyListener
 	config     *Config
+	handler    *requestHandler
 	addConn    internet.ConnHandler
 	isH3       bool
 }
@@ -499,6 +558,7 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 		sessions:       sync.Map{},
 		socketSettings: streamSettings.SocketSettings,
 	}
+	l.handler = handler
 	tlsConfig := getTLSConfig(streamSettings)
 	l.isH3 = len(tlsConfig.NextProtos) == 1 && tlsConfig.NextProtos[0] == "h3"
 
@@ -643,16 +703,22 @@ func (ln *Listener) Addr() net.Addr {
 
 // Close implements net.Listener.Close().
 func (ln *Listener) Close() error {
+	var err error
 	if ln.h3server != nil {
-		if err := ln.h3server.Close(); err != nil {
+		if err = ln.h3server.Close(); err != nil {
 			_ = ln.h3listener.Close()
-			return err
+		} else {
+			err = ln.h3listener.Close()
 		}
-		return ln.h3listener.Close()
 	} else if ln.listener != nil {
-		return ln.listener.Close()
+		err = ln.listener.Close()
+	} else {
+		err = errors.New("listener does not have an HTTP/3 server or a net.listener")
 	}
-	return errors.New("listener does not have an HTTP/3 server or a net.listener")
+	if ln.handler != nil {
+		ln.handler.close()
+	}
+	return err
 }
 func getTLSConfig(streamSettings *internet.MemoryStreamConfig) *gotls.Config {
 	config := tls.ConfigFromStreamSettings(streamSettings)

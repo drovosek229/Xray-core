@@ -13,6 +13,21 @@ import (
 	"time"
 )
 
+func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !cond() {
+		t.Fatal("condition not met before timeout")
+	}
+}
+
 func TestBalancedRequestBehaviorStable(t *testing.T) {
 	config := &Config{
 		BehaviorProfile: BehaviorProfileBalanced,
@@ -71,11 +86,10 @@ func TestSessionOpenTimeoutReapsUnconnectedSession(t *testing.T) {
 		t.Fatal("expected session to exist immediately after creation")
 	}
 
-	time.Sleep(1200 * time.Millisecond)
-
-	if _, ok := handler.sessions.Load("open-timeout"); ok {
-		t.Fatal("expected session to be reaped after open timeout")
-	}
+	waitForCondition(t, 3*time.Second, func() bool {
+		_, ok := handler.sessions.Load("open-timeout")
+		return !ok
+	})
 	if err := session.uploadQueue.Push(Packet{Payload: []byte("x"), Seq: 0}); err == nil {
 		t.Fatal("expected closed upload queue after open-timeout reap")
 	}
@@ -91,11 +105,10 @@ func TestSessionIdleTimeoutReapsConnectedSession(t *testing.T) {
 	session.isFullyConnected.Close()
 	session.touch()
 
-	time.Sleep(1200 * time.Millisecond)
-
-	if _, ok := handler.sessions.Load("idle-timeout"); ok {
-		t.Fatal("expected session to be reaped after idle timeout")
-	}
+	waitForCondition(t, 3*time.Second, func() bool {
+		_, ok := handler.sessions.Load("idle-timeout")
+		return !ok
+	})
 }
 
 func TestSplitConnDeadlinesCloseSides(t *testing.T) {
@@ -175,6 +188,56 @@ func TestH1UploadConnectionReuse(t *testing.T) {
 
 	if dialCount != 1 {
 		t.Fatalf("expected one H1 upload connection, got %d", dialCount)
+	}
+}
+
+func TestH1UploadRetriesReplayableBody(t *testing.T) {
+	var dialCount int
+
+	client := &DefaultDialerClient{
+		transportConfig: &Config{
+			UplinkHTTPMethod: "POST",
+		},
+		httpVersion: "1.1",
+		dialUploadConn: func(context.Context) (net.Conn, error) {
+			dialCount++
+			clientConn, serverConn := net.Pipe()
+			if dialCount == 1 {
+				go func() {
+					defer serverConn.Close()
+					req, err := http.ReadRequest(bufio.NewReader(serverConn))
+					if err != nil {
+						t.Errorf("failed to read retry request: %v", err)
+						return
+					}
+					if _, err := io.Copy(io.Discard, req.Body); err != nil {
+						t.Errorf("failed to drain retry request: %v", err)
+					}
+					req.Body.Close()
+				}()
+				return clientConn, nil
+			}
+
+			go serveH1UploadResponses(t, serverConn, 1)
+			return clientConn, nil
+		},
+	}
+
+	err := client.PostPacket(
+		context.Background(),
+		"http://example.com/upload",
+		"session",
+		"0",
+		bytes.NewReader([]byte("payload")),
+		int64(len("payload")),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("unexpected H1 retry error: %v", err)
+	}
+
+	if dialCount != 2 {
+		t.Fatalf("expected retry to open a second H1 upload connection, got %d", dialCount)
 	}
 }
 
