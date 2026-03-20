@@ -14,15 +14,86 @@ import (
 	"github.com/xtls/xray-core/transport"
 )
 
+const requestReplayLimitBytes int64 = 128 * 1024
+
+type requestReplayRecorderKey struct{}
+
+type requestReplayRecorder struct {
+	enabled  bool
+	blocked  bool
+	size     int64
+	recorded [][]byte
+}
+
+func contextWithRequestReplayRecorder(ctx context.Context, recorder *requestReplayRecorder) context.Context {
+	return context.WithValue(ctx, requestReplayRecorderKey{}, recorder)
+}
+
+func requestReplayRecorderFromContext(ctx context.Context) *requestReplayRecorder {
+	if recorder, ok := ctx.Value(requestReplayRecorderKey{}).(*requestReplayRecorder); ok {
+		return recorder
+	}
+	return nil
+}
+
+func newRequestReplayRecorder() *requestReplayRecorder {
+	return &requestReplayRecorder{}
+}
+
+func (r *requestReplayRecorder) Enable() {
+	if r == nil || r.blocked {
+		return
+	}
+	r.enabled = true
+}
+
+func (r *requestReplayRecorder) Record(mb buf.MultiBuffer) {
+	if r == nil || !r.enabled || r.blocked || mb.IsEmpty() {
+		return
+	}
+
+	recordedSize := int64(mb.Len())
+	if r.size+recordedSize > requestReplayLimitBytes {
+		r.enabled = false
+		r.blocked = true
+		r.size = 0
+		r.recorded = nil
+		return
+	}
+
+	recorded := make([]byte, recordedSize)
+	mb.Copy(recorded)
+	r.recorded = append(r.recorded, recorded)
+	r.size += recordedSize
+}
+
+func (r *requestReplayRecorder) CanReplay() bool {
+	return r != nil && r.enabled && !r.blocked
+}
+
+func (r *requestReplayRecorder) ReplayReader(reader buf.Reader, timeoutReader buf.TimeoutReader) buf.Reader {
+	if !r.CanReplay() {
+		return nil
+	}
+
+	recorded := make([][]byte, len(r.recorded))
+	copy(recorded, r.recorded)
+	return &replayingReader{
+		reader:        reader,
+		timeoutReader: timeoutReader,
+		recorded:      recorded,
+	}
+}
+
 type countingReader struct {
 	reader        buf.Reader
 	timeoutReader buf.TimeoutReader
 	bytesRead     int64
-	recorded      [][]byte
+	replay        *requestReplayRecorder
 }
 
-func newCountingReader(reader buf.Reader) *countingReader {
-	counted := &countingReader{reader: reader}
+func newCountingReader(reader buf.Reader, replay *requestReplayRecorder) *countingReader {
+	counted := &countingReader{reader: reader, replay: replay}
 	if timeoutReader, ok := reader.(buf.TimeoutReader); ok {
 		counted.timeoutReader = timeoutReader
 	}
@@ -56,14 +127,15 @@ func (r *countingReader) BytesRead() int64 {
 	return r.bytesRead
 }
 
+func (r *countingReader) CanReplay() bool {
+	return r.replay != nil && r.replay.CanReplay()
+}
+
 func (r *countingReader) ReplayReader() buf.Reader {
-	recorded := make([][]byte, len(r.recorded))
-	copy(recorded, r.recorded)
-	return &replayingReader{
-		reader:        r.reader,
-		timeoutReader: r.timeoutReader,
-		recorded:      recorded,
+	if r.replay == nil {
+		return nil
 	}
+	return r.replay.ReplayReader(r.reader, r.timeoutReader)
 }
 
 func (r *countingReader) record(mb buf.MultiBuffer) {
@@ -71,10 +143,10 @@ func (r *countingReader) record(mb buf.MultiBuffer) {
 		return
 	}
 
-	recorded := make([]byte, mb.Len())
-	mb.Copy(recorded)
-	r.bytesRead += int64(len(recorded))
-	r.recorded = append(r.recorded, recorded)
+	r.bytesRead += int64(mb.Len())
+	if r.replay != nil {
+		r.replay.Record(mb)
+	}
 }
 
 type replayingReader struct {
@@ -152,12 +224,17 @@ func (h *Handler) handleBalancerFailure(ctx context.Context, writer buf.Writer, 
 	if !ok || snapshot.SelectedOutboundTag == "" {
 		return false
 	}
-
-	if feedback := h.observatoryFeedbackFromContext(ctx); feedback != nil {
-		feedback.RecordOutboundFailure(ctx, snapshot.SelectedOutboundTag, err.Error())
+	if ctx.Err() != nil || responseBytesWritten != 0 {
+		return false
 	}
 
-	if snapshot.Retried || snapshot.RetryOwnerTag != h.tag || responseBytesWritten != 0 || (!allowConsumedRequest && requestBytesRead != 0) {
+	if snapshot.RetryOwnerTag == h.tag {
+		if feedback := h.observatoryFeedbackFromContext(ctx); feedback != nil {
+			feedback.RecordOutboundFailure(ctx, snapshot.SelectedOutboundTag, err.Error())
+		}
+	}
+
+	if snapshot.Retried || snapshot.RetryOwnerTag != h.tag || requestReader == nil || !requestReader.CanReplay() || (!allowConsumedRequest && requestBytesRead != 0) {
 		return false
 	}
 
@@ -170,13 +247,18 @@ func (h *Handler) handleBalancerFailure(ctx context.Context, writer buf.Writer, 
 		return false
 	}
 
+	replayReader := requestReader.ReplayReader()
+	if replayReader == nil {
+		return false
+	}
+
 	switch updatedSnapshot.Kind {
 	case session.BalancerSelectionKindRoute:
-		return h.retryRouteBalancer(ctx, writer, requestReader, updatedSnapshot)
+		return h.retryRouteBalancer(ctx, writer, replayReader, updatedSnapshot)
 	case session.BalancerSelectionKindDialerProxy:
 		errors.LogInfo(ctx, "retrying dialer proxy balancer [", updatedSnapshot.BalancerTag, "] after outbound [", updatedSnapshot.SelectedOutboundTag, "] failed")
 		h.Dispatch(ctx, &transport.Link{
-			Reader: requestReader.ReplayReader(),
+			Reader: replayReader,
 			Writer: writer,
 		})
 		return true
@@ -186,25 +268,20 @@ func (h *Handler) handleBalancerFailure(ctx context.Context, writer buf.Writer, 
 }
 
 func (h *Handler) shouldTreatBenignErrorAsFailure(ctx context.Context, err error, requestBytesRead, responseBytesWritten int64) bool {
-	if responseBytesWritten != 0 {
-		return false
-	}
-	if requestBytesRead != 0 && !goerrors.Is(err, io.EOF) && !goerrors.Is(err, context.Canceled) {
+	if ctx.Err() != nil || responseBytesWritten != 0 {
 		return false
 	}
 	snapshot, ok := session.GetBalancerRetrySnapshot(ctx)
-	return ok && snapshot.SelectedOutboundTag != ""
-}
-
-func (h *Handler) shouldTreatCompletionWithoutResponseAsFailure(ctx context.Context, responseBytesWritten int64) bool {
-	if responseBytesWritten != 0 {
+	if !ok || snapshot.SelectedOutboundTag == "" {
 		return false
 	}
-	snapshot, ok := session.GetBalancerRetrySnapshot(ctx)
-	return ok && snapshot.SelectedOutboundTag != ""
+	if requestBytesRead == 0 {
+		return true
+	}
+	return goerrors.Is(err, io.EOF) || goerrors.Is(err, context.Canceled)
 }
 
-func (h *Handler) retryRouteBalancer(ctx context.Context, writer buf.Writer, requestReader *countingReader, snapshot session.BalancerRetrySnapshot) bool {
+func (h *Handler) retryRouteBalancer(ctx context.Context, writer buf.Writer, replayReader buf.Reader, snapshot session.BalancerRetrySnapshot) bool {
 	selector := h.balancerSelectorExFromContext(ctx)
 	if selector == nil {
 		errors.LogInfo(ctx, "cannot retry route balancer [", snapshot.BalancerTag, "]: balancer exclusion support unavailable")
@@ -234,7 +311,7 @@ func (h *Handler) retryRouteBalancer(ctx context.Context, writer buf.Writer, req
 
 	errors.LogInfo(ctx, "retrying route balancer [", snapshot.BalancerTag, "] from outbound [", snapshot.SelectedOutboundTag, "] to [", nextTag, "]")
 	handler.Dispatch(ctx, &transport.Link{
-		Reader: requestReader.ReplayReader(),
+		Reader: replayReader,
 		Writer: writer,
 	})
 	return true
@@ -280,6 +357,9 @@ func (h *Handler) resolveProxyTarget(ctx context.Context, tag string) (string, o
 	}
 
 	session.UpdateBalancerSelection(ctx, session.BalancerSelectionKindDialerProxy, tag, h.tag, resolved)
+	if recorder := requestReplayRecorderFromContext(ctx); recorder != nil {
+		recorder.Enable()
+	}
 	errors.LogInfo(ctx, "resolved chained proxy balancer ", tag, " to outbound ", resolved)
 	return resolved, handler, nil
 }

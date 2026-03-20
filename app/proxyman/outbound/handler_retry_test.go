@@ -42,7 +42,9 @@ func (m *retryTestOutboundManager) GetHandler(tag string) feature_outbound.Handl
 
 func (*retryTestOutboundManager) GetDefaultHandler() feature_outbound.Handler { return nil }
 
-func (*retryTestOutboundManager) AddHandler(context.Context, feature_outbound.Handler) error { return nil }
+func (*retryTestOutboundManager) AddHandler(context.Context, feature_outbound.Handler) error {
+	return nil
+}
 
 func (*retryTestOutboundManager) RemoveHandler(context.Context, string) error { return nil }
 
@@ -96,6 +98,28 @@ func newRetryTestContext() context.Context {
 	}})
 	ctx = session.ContextWithContent(ctx, &session.Content{})
 	return ctx
+}
+
+func readAllRetryTestPayload(t *testing.T, reader buf.Reader) []byte {
+	t.Helper()
+
+	var payload []byte
+	for {
+		mb, err := reader.ReadMultiBuffer()
+		if !mb.IsEmpty() {
+			chunk := make([]byte, mb.Len())
+			mb.Copy(chunk)
+			payload = append(payload, chunk...)
+			buf.ReleaseMulti(mb)
+		}
+		if err == nil {
+			continue
+		}
+		if err == io.EOF {
+			return payload
+		}
+		t.Fatalf("failed to read test payload: %v", err)
+	}
 }
 
 func TestHandlerRetriesRouteBalancerBeforeAnyPayloadFlows(t *testing.T) {
@@ -248,6 +272,279 @@ func TestHandlerDoesNotRetryAfterResponseBytesAreWritten(t *testing.T) {
 	}
 }
 
+func TestHandlerDoesNotRetryAfterZeroResponseSuccess(t *testing.T) {
+	manager := &retryTestOutboundManager{handlers: map[string]feature_outbound.Handler{}}
+	selector := &retryTestBalancerSelector{
+		choices: map[string][]string{
+			"balancer": {"proxy-a", "proxy-b"},
+		},
+	}
+	feedback := &retryTestObservatoryFeedback{}
+
+	proxyA := &retryTestProxy{process: func(context.Context, *transport.Link, internet.Dialer) error {
+		return nil
+	}}
+	proxyB := &retryTestProxy{process: func(context.Context, *transport.Link, internet.Dialer) error {
+		return nil
+	}}
+
+	handlerA := &Handler{
+		tag:                 "proxy-a",
+		proxy:               proxyA,
+		outboundManager:     manager,
+		balancerSelectorEx:  selector,
+		observatoryFeedback: feedback,
+	}
+	handlerB := &Handler{
+		tag:                 "proxy-b",
+		proxy:               proxyB,
+		outboundManager:     manager,
+		balancerSelectorEx:  selector,
+		observatoryFeedback: feedback,
+	}
+	manager.handlers["proxy-a"] = handlerA
+	manager.handlers["proxy-b"] = handlerB
+
+	ctx := newRetryTestContext()
+	ctx = session.SetBalancerSelection(ctx, session.BalancerSelectionKindRoute, "balancer", "proxy-a", "proxy-a")
+
+	link := &transport.Link{
+		Reader: buf.NewReader(bytes.NewReader(nil)),
+		Writer: buf.NewWriter(io.Discard),
+	}
+
+	handlerA.Dispatch(ctx, link)
+
+	if proxyA.calls != 1 {
+		t.Fatalf("expected proxy-a to run once, got %d", proxyA.calls)
+	}
+	if proxyB.calls != 0 {
+		t.Fatalf("expected no retry on zero-response success, got %d retries", proxyB.calls)
+	}
+	if len(feedback.tags) != 0 {
+		t.Fatalf("expected no failure report on success, got %v", feedback.tags)
+	}
+}
+
+func TestHandlerDoesNotRetryOrReportWhenParentContextCanceled(t *testing.T) {
+	manager := &retryTestOutboundManager{handlers: map[string]feature_outbound.Handler{}}
+	selector := &retryTestBalancerSelector{
+		choices: map[string][]string{
+			"balancer": {"proxy-a", "proxy-b"},
+		},
+	}
+	feedback := &retryTestObservatoryFeedback{}
+
+	proxyA := &retryTestProxy{process: func(context.Context, *transport.Link, internet.Dialer) error {
+		return context.Canceled
+	}}
+	proxyB := &retryTestProxy{process: func(context.Context, *transport.Link, internet.Dialer) error {
+		return nil
+	}}
+
+	handlerA := &Handler{
+		tag:                 "proxy-a",
+		proxy:               proxyA,
+		outboundManager:     manager,
+		balancerSelectorEx:  selector,
+		observatoryFeedback: feedback,
+	}
+	handlerB := &Handler{
+		tag:                 "proxy-b",
+		proxy:               proxyB,
+		outboundManager:     manager,
+		balancerSelectorEx:  selector,
+		observatoryFeedback: feedback,
+	}
+	manager.handlers["proxy-a"] = handlerA
+	manager.handlers["proxy-b"] = handlerB
+
+	parentCtx, cancel := context.WithCancel(newRetryTestContext())
+	cancel()
+	ctx := session.SetBalancerSelection(parentCtx, session.BalancerSelectionKindRoute, "balancer", "proxy-a", "proxy-a")
+
+	link := &transport.Link{
+		Reader: buf.NewReader(bytes.NewReader([]byte("payload"))),
+		Writer: buf.NewWriter(io.Discard),
+	}
+
+	handlerA.Dispatch(ctx, link)
+
+	if proxyA.calls != 1 {
+		t.Fatalf("expected proxy-a to run once, got %d", proxyA.calls)
+	}
+	if proxyB.calls != 0 {
+		t.Fatalf("expected no retry after parent cancellation, got %d retries", proxyB.calls)
+	}
+	if len(feedback.tags) != 0 {
+		t.Fatalf("expected no failure report after parent cancellation, got %v", feedback.tags)
+	}
+}
+
+func TestHandlerRetriesRouteBalancerOnConsumedContextCanceled(t *testing.T) {
+	manager := &retryTestOutboundManager{handlers: map[string]feature_outbound.Handler{}}
+	selector := &retryTestBalancerSelector{
+		choices: map[string][]string{
+			"balancer": {"proxy-a", "proxy-b"},
+		},
+	}
+
+	var proxyAPayload []byte
+	var proxyBPayload []byte
+	proxyA := &retryTestProxy{process: func(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
+		proxyAPayload = readAllRetryTestPayload(t, link.Reader)
+		return context.Canceled
+	}}
+	proxyB := &retryTestProxy{process: func(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
+		proxyBPayload = readAllRetryTestPayload(t, link.Reader)
+		return nil
+	}}
+
+	handlerA := &Handler{
+		tag:                "proxy-a",
+		proxy:              proxyA,
+		outboundManager:    manager,
+		balancerSelectorEx: selector,
+	}
+	handlerB := &Handler{
+		tag:                "proxy-b",
+		proxy:              proxyB,
+		outboundManager:    manager,
+		balancerSelectorEx: selector,
+	}
+	manager.handlers["proxy-a"] = handlerA
+	manager.handlers["proxy-b"] = handlerB
+
+	ctx := newRetryTestContext()
+	ctx = session.SetBalancerSelection(ctx, session.BalancerSelectionKindRoute, "balancer", "proxy-a", "proxy-a")
+
+	requestPayload := []byte("payload")
+	link := &transport.Link{
+		Reader: buf.NewReader(bytes.NewReader(requestPayload)),
+		Writer: buf.NewWriter(io.Discard),
+	}
+
+	handlerA.Dispatch(ctx, link)
+
+	if proxyB.calls != 1 {
+		t.Fatalf("expected retry on consumed context cancellation, got %d retries", proxyB.calls)
+	}
+	if !bytes.Equal(proxyAPayload, requestPayload) {
+		t.Fatalf("expected proxy-a to receive original payload, got %q", proxyAPayload)
+	}
+	if !bytes.Equal(proxyBPayload, requestPayload) {
+		t.Fatalf("expected proxy-b to receive replayed payload, got %q", proxyBPayload)
+	}
+}
+
+func TestHandlerRetriesRouteBalancerOnConsumedEOF(t *testing.T) {
+	manager := &retryTestOutboundManager{handlers: map[string]feature_outbound.Handler{}}
+	selector := &retryTestBalancerSelector{
+		choices: map[string][]string{
+			"balancer": {"proxy-a", "proxy-b"},
+		},
+	}
+
+	var proxyBPayload []byte
+	proxyA := &retryTestProxy{process: func(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
+		_ = readAllRetryTestPayload(t, link.Reader)
+		return io.EOF
+	}}
+	proxyB := &retryTestProxy{process: func(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
+		proxyBPayload = readAllRetryTestPayload(t, link.Reader)
+		return nil
+	}}
+
+	handlerA := &Handler{
+		tag:                "proxy-a",
+		proxy:              proxyA,
+		outboundManager:    manager,
+		balancerSelectorEx: selector,
+	}
+	handlerB := &Handler{
+		tag:                "proxy-b",
+		proxy:              proxyB,
+		outboundManager:    manager,
+		balancerSelectorEx: selector,
+	}
+	manager.handlers["proxy-a"] = handlerA
+	manager.handlers["proxy-b"] = handlerB
+
+	ctx := newRetryTestContext()
+	ctx = session.SetBalancerSelection(ctx, session.BalancerSelectionKindRoute, "balancer", "proxy-a", "proxy-a")
+
+	requestPayload := []byte("payload")
+	link := &transport.Link{
+		Reader: buf.NewReader(bytes.NewReader(requestPayload)),
+		Writer: buf.NewWriter(io.Discard),
+	}
+
+	handlerA.Dispatch(ctx, link)
+
+	if proxyB.calls != 1 {
+		t.Fatalf("expected retry on consumed EOF, got %d retries", proxyB.calls)
+	}
+	if !bytes.Equal(proxyBPayload, requestPayload) {
+		t.Fatalf("expected proxy-b to receive replayed payload, got %q", proxyBPayload)
+	}
+}
+
+func TestHandlerReplayBudgetExceededDisablesRetryButReportsFailure(t *testing.T) {
+	manager := &retryTestOutboundManager{handlers: map[string]feature_outbound.Handler{}}
+	selector := &retryTestBalancerSelector{
+		choices: map[string][]string{
+			"balancer": {"proxy-a", "proxy-b"},
+		},
+	}
+	feedback := &retryTestObservatoryFeedback{}
+
+	largePayload := bytes.Repeat([]byte("x"), int(requestReplayLimitBytes)+1)
+	proxyA := &retryTestProxy{process: func(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
+		received := readAllRetryTestPayload(t, link.Reader)
+		if len(received) != len(largePayload) {
+			t.Fatalf("expected large payload length %d, got %d", len(largePayload), len(received))
+		}
+		return context.Canceled
+	}}
+	proxyB := &retryTestProxy{process: func(context.Context, *transport.Link, internet.Dialer) error {
+		return nil
+	}}
+
+	handlerA := &Handler{
+		tag:                 "proxy-a",
+		proxy:               proxyA,
+		outboundManager:     manager,
+		balancerSelectorEx:  selector,
+		observatoryFeedback: feedback,
+	}
+	handlerB := &Handler{
+		tag:                 "proxy-b",
+		proxy:               proxyB,
+		outboundManager:     manager,
+		balancerSelectorEx:  selector,
+		observatoryFeedback: feedback,
+	}
+	manager.handlers["proxy-a"] = handlerA
+	manager.handlers["proxy-b"] = handlerB
+
+	ctx := newRetryTestContext()
+	ctx = session.SetBalancerSelection(ctx, session.BalancerSelectionKindRoute, "balancer", "proxy-a", "proxy-a")
+
+	link := &transport.Link{
+		Reader: buf.NewReader(bytes.NewReader(largePayload)),
+		Writer: buf.NewWriter(io.Discard),
+	}
+
+	handlerA.Dispatch(ctx, link)
+
+	if proxyB.calls != 0 {
+		t.Fatalf("expected no retry when replay budget is exceeded, got %d retries", proxyB.calls)
+	}
+	if len(feedback.tags) != 1 || feedback.tags[0] != "proxy-a" {
+		t.Fatalf("expected proxy-a failure to be reported once, got %v", feedback.tags)
+	}
+}
+
 func TestHandlerRetriesDialerProxyBalancerByRerunningOuterOutbound(t *testing.T) {
 	manager := &retryTestOutboundManager{handlers: map[string]feature_outbound.Handler{}}
 	selector := &retryTestBalancerSelector{
@@ -325,5 +622,8 @@ func TestHandlerRetriesDialerProxyBalancerByRerunningOuterOutbound(t *testing.T)
 	}
 	if got := selector.excludingCalls[1]; len(got) != 1 || got[0] != "proxy-a" {
 		t.Fatalf("expected second balancer call to exclude proxy-a, got %v", got)
+	}
+	if len(feedback.tags) != 1 || feedback.tags[0] != "proxy-a" {
+		t.Fatalf("expected a single proxy-a failure report from the owner handler, got %v", feedback.tags)
 	}
 }

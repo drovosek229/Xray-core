@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"sort"
 	"sync"
 
 	"github.com/xtls/xray-core/common/ctx"
@@ -26,8 +27,8 @@ type BalancerRetrySnapshot struct {
 }
 
 type balancerRetryState struct {
-	access    sync.Mutex
-	snapshot  BalancerRetrySnapshot
+	access     sync.Mutex
+	snapshot   BalancerRetrySnapshot
 	exclusions map[string]struct{}
 }
 
@@ -122,11 +123,18 @@ func GetBalancerRetrySnapshot(ctx context.Context) (BalancerRetrySnapshot, bool)
 	defer state.access.Unlock()
 
 	snapshot := state.snapshot
-	if len(state.exclusions) > 0 {
-		snapshot.ExcludedOutboundTags = snapshot.ExcludedOutboundTags[:0]
+	excludedCount := len(state.exclusions)
+	if excludedCount > 0 {
+		excluded := make([]string, 0, excludedCount)
 		for tag := range state.exclusions {
-			snapshot.ExcludedOutboundTags = append(snapshot.ExcludedOutboundTags, tag)
+			excluded = append(excluded, tag)
 		}
+		sort.Strings(excluded)
+		snapshot.ExcludedOutboundTags = excluded
+	} else if len(snapshot.ExcludedOutboundTags) > 0 {
+		excluded := append([]string(nil), snapshot.ExcludedOutboundTags...)
+		sort.Strings(excluded)
+		snapshot.ExcludedOutboundTags = excluded
 	}
 	return snapshot, true
 }
