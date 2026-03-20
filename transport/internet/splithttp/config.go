@@ -273,15 +273,16 @@ func (c *Config) ApplyMetaToRequest(req *http.Request, sessionId string, seqStr 
 	seqPlacement := c.GetNormalizedSeqPlacement()
 	sessionKey := c.GetNormalizedSessionKey()
 	seqKey := c.GetNormalizedSeqKey()
+	queryValues := req.URL.Query()
+	queryChanged := false
 
 	if sessionId != "" {
 		switch sessionPlacement {
 		case PlacementPath:
 			req.URL.Path = appendToPath(req.URL.Path, sessionId)
 		case PlacementQuery:
-			q := req.URL.Query()
-			q.Set(sessionKey, sessionId)
-			req.URL.RawQuery = q.Encode()
+			queryValues.Set(sessionKey, sessionId)
+			queryChanged = true
 		case PlacementHeader:
 			req.Header.Set(sessionKey, sessionId)
 		case PlacementCookie:
@@ -294,14 +295,17 @@ func (c *Config) ApplyMetaToRequest(req *http.Request, sessionId string, seqStr 
 		case PlacementPath:
 			req.URL.Path = appendToPath(req.URL.Path, seqStr)
 		case PlacementQuery:
-			q := req.URL.Query()
-			q.Set(seqKey, seqStr)
-			req.URL.RawQuery = q.Encode()
+			queryValues.Set(seqKey, seqStr)
+			queryChanged = true
 		case PlacementHeader:
 			req.Header.Set(seqKey, seqStr)
 		case PlacementCookie:
 			req.AddCookie(&http.Cookie{Name: seqKey, Value: seqStr})
 		}
+	}
+
+	if queryChanged {
+		req.URL.RawQuery = queryValues.Encode()
 	}
 }
 
