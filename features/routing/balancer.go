@@ -4,6 +4,10 @@ type BalancerSelector interface {
 	PickBalancerOutbound(tag string) (string, bool, error)
 }
 
+type BalancerSelectorEx interface {
+	PickBalancerOutboundExcluding(tag string, excluded []string) (string, bool, error)
+}
+
 type BalancerOverrider interface {
 	SetOverrideTarget(tag, target string) error
 	GetOverrideTarget(tag string) (string, error)

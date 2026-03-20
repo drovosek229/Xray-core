@@ -23,6 +23,7 @@ type Observer struct {
 
 	statusLock sync.RWMutex
 	status     []*observatory.OutboundStatus
+	failures   map[string]liveFailure
 	hp         *HealthPing
 
 	finished *done.Instance
@@ -30,10 +31,18 @@ type Observer struct {
 	ohm outbound.Manager
 }
 
+type liveFailure struct {
+	lastErrorReason string
+	lastTryTime     int64
+}
+
 func (o *Observer) GetObservation(ctx context.Context) (proto.Message, error) {
 	o.statusLock.RLock()
-	defer o.statusLock.RUnlock()
-	return &observatory.ObservationResult{Status: cloneObservationStatuses(o.status)}, nil
+	status := cloneObservationStatuses(o.status)
+	failures := cloneLiveFailures(o.failures)
+	o.statusLock.RUnlock()
+
+	return &observatory.ObservationResult{Status: applyLiveFailures(status, failures)}, nil
 }
 
 func (o *Observer) createResult() []*observatory.OutboundStatus {
@@ -112,7 +121,31 @@ func (o *Observer) refreshSnapshot() {
 func (o *Observer) setStatusSnapshot(status []*observatory.OutboundStatus) {
 	o.statusLock.Lock()
 	defer o.statusLock.Unlock()
+	for _, snapshot := range status {
+		if snapshot != nil && snapshot.Alive {
+			delete(o.failures, snapshot.OutboundTag)
+		}
+	}
 	o.status = status
+}
+
+func (o *Observer) RecordOutboundFailure(ctx context.Context, outboundTag, reason string) {
+	if outboundTag == "" {
+		return
+	}
+	if reason == "" {
+		reason = "runtime request failed"
+	}
+
+	o.statusLock.Lock()
+	defer o.statusLock.Unlock()
+	if o.failures == nil {
+		o.failures = make(map[string]liveFailure)
+	}
+	o.failures[outboundTag] = liveFailure{
+		lastErrorReason: reason,
+		lastTryTime:     time.Now().Unix(),
+	}
 }
 
 func cloneObservationStatuses(statuses []*observatory.OutboundStatus) []*observatory.OutboundStatus {
@@ -131,23 +164,66 @@ func cloneObservationStatuses(statuses []*observatory.OutboundStatus) []*observa
 	return clones
 }
 
-func New(ctx context.Context, config *Config) (*Observer, error) {
-	var outboundManager outbound.Manager
-	var dispatcher routing.Dispatcher
-	err := core.RequireFeatures(ctx, func(om outbound.Manager, rd routing.Dispatcher) {
-		outboundManager = om
-		dispatcher = rd
-	})
-	if err != nil {
-		return nil, errors.New("Cannot get depended features").Base(err)
+func cloneLiveFailures(failures map[string]liveFailure) map[string]liveFailure {
+	if len(failures) == 0 {
+		return nil
 	}
-	hp := NewHealthPing(ctx, dispatcher, config.PingConfig)
-	return &Observer{
+	clones := make(map[string]liveFailure, len(failures))
+	for tag, failure := range failures {
+		clones[tag] = failure
+	}
+	return clones
+}
+
+func applyLiveFailures(statuses []*observatory.OutboundStatus, failures map[string]liveFailure) []*observatory.OutboundStatus {
+	if len(failures) == 0 {
+		return statuses
+	}
+
+	indexByTag := make(map[string]int, len(statuses))
+	for idx, status := range statuses {
+		if status == nil {
+			continue
+		}
+		indexByTag[status.OutboundTag] = idx
+	}
+
+	for tag, failure := range failures {
+		if idx, found := indexByTag[tag]; found {
+			statuses[idx].Alive = false
+			statuses[idx].Delay = rttFailed.Milliseconds()
+			statuses[idx].LastErrorReason = failure.lastErrorReason
+			statuses[idx].LastTryTime = failure.lastTryTime
+			continue
+		}
+
+		statuses = append(statuses, &observatory.OutboundStatus{
+			Alive:           false,
+			Delay:           rttFailed.Milliseconds(),
+			LastErrorReason: failure.lastErrorReason,
+			OutboundTag:     tag,
+			LastTryTime:     failure.lastTryTime,
+		})
+	}
+
+	sort.Slice(statuses, func(i, j int) bool {
+		return statuses[i].OutboundTag < statuses[j].OutboundTag
+	})
+	return statuses
+}
+
+func New(ctx context.Context, config *Config) (*Observer, error) {
+	observer := &Observer{
 		config: config,
 		ctx:    ctx,
-		ohm:    outboundManager,
-		hp:     hp,
-	}, nil
+	}
+	if err := core.RequireFeatures(ctx, func(om outbound.Manager, rd routing.Dispatcher) {
+		observer.ohm = om
+		observer.hp = NewHealthPing(ctx, rd, config.PingConfig)
+	}); err != nil {
+		return nil, errors.New("Cannot get depended features").Base(err)
+	}
+	return observer, nil
 }
 
 func init() {

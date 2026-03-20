@@ -307,21 +307,17 @@ type probeResult struct {
 }
 
 func New(ctx context.Context, config *Config) (*Observer, error) {
-	var outboundManager outbound.Manager
-	var dispatcher routing.Dispatcher
-	err := core.RequireFeatures(ctx, func(om outbound.Manager, rd routing.Dispatcher) {
-		outboundManager = om
-		dispatcher = rd
-	})
-	if err != nil {
+	observer := &Observer{
+		config: config,
+		ctx:    ctx,
+	}
+	if err := core.RequireFeatures(ctx, func(om outbound.Manager, rd routing.Dispatcher) {
+		observer.ohm = om
+		observer.dispatcher = rd
+	}); err != nil {
 		return nil, errors.New("Cannot get depended features").Base(err)
 	}
-	return &Observer{
-		config:     config,
-		ctx:        ctx,
-		ohm:        outboundManager,
-		dispatcher: dispatcher,
-	}, nil
+	return observer, nil
 }
 
 func init() {

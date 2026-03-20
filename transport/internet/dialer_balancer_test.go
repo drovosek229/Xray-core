@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/xtls/xray-core/common/serial"
+	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/transport"
 )
@@ -60,6 +61,16 @@ type testBalancerSelector struct {
 
 func (s *testBalancerSelector) PickBalancerOutbound(string) (string, bool, error) {
 	s.calls++
+	return s.outboundTag, s.found, s.err
+}
+
+func (s *testBalancerSelector) PickBalancerOutboundExcluding(_ string, excluded []string) (string, bool, error) {
+	s.calls++
+	for _, tag := range excluded {
+		if tag == s.outboundTag {
+			return "proxy-b", s.found, s.err
+		}
+	}
 	return s.outboundTag, s.found, s.err
 }
 
@@ -127,5 +138,44 @@ func TestResolveDialerProxyReturnsBalancerError(t *testing.T) {
 	}
 	if diff := strings.Join(manager.lookups, ","); diff != "balancer" {
 		t.Fatalf("unexpected lookup order: got %q want %q", diff, "balancer")
+	}
+}
+
+func TestResolveDialerProxyUsesBalancerExclusions(t *testing.T) {
+	manager := &testOutboundManager{
+		handlers: map[string]outbound.Handler{
+			"proxy-b": &testOutboundHandler{tag: "proxy-b"},
+		},
+	}
+	selector := &testBalancerSelector{
+		outboundTag: "proxy-a",
+		found:       true,
+	}
+
+	prevObm := obm
+	prevRoutingBalancer := routingBalancer
+	obm = manager
+	routingBalancer = selector
+	t.Cleanup(func() {
+		obm = prevObm
+		routingBalancer = prevRoutingBalancer
+	})
+
+	ctx := session.SetBalancerSelection(session.ContextWithBalancerRetryState(context.Background()), session.BalancerSelectionKindDialerProxy, "balancer", "outer", "proxy-a")
+	session.AddBalancerExclusion(ctx, "proxy-a")
+
+	tag, _, err := resolveDialerProxy(ctx, "balancer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tag != "proxy-b" {
+		t.Fatalf("expected proxy-b after excluding proxy-a, got %q", tag)
+	}
+	snapshot, ok := session.GetBalancerRetrySnapshot(ctx)
+	if !ok {
+		t.Fatal("expected balancer retry snapshot to be updated")
+	}
+	if snapshot.SelectedOutboundTag != "proxy-b" {
+		t.Fatalf("expected selected outbound to update to proxy-b, got %q", snapshot.SelectedOutboundTag)
 	}
 }

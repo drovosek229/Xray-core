@@ -148,6 +148,7 @@ func (br *BalancingRule) Build(ohm outbound.Manager, dispatcher routing.Dispatch
 	switch strings.ToLower(br.Strategy) {
 	case "leastping":
 		return &Balancer{
+			tag:         br.Tag,
 			selectors:   br.OutboundSelector,
 			strategy:    &LeastPingStrategy{},
 			fallbackTag: br.FallbackTag,
@@ -155,6 +156,7 @@ func (br *BalancingRule) Build(ohm outbound.Manager, dispatcher routing.Dispatch
 		}, nil
 	case "roundrobin":
 		return &Balancer{
+			tag:         br.Tag,
 			selectors:   br.OutboundSelector,
 			strategy:    &RoundRobinStrategy{FallbackTag: br.FallbackTag},
 			fallbackTag: br.FallbackTag,
@@ -171,6 +173,7 @@ func (br *BalancingRule) Build(ohm outbound.Manager, dispatcher routing.Dispatch
 		}
 		leastLoadStrategy := NewLeastLoadStrategy(s)
 		return &Balancer{
+			tag:         br.Tag,
 			selectors:   br.OutboundSelector,
 			ohm:         ohm,
 			fallbackTag: br.FallbackTag,
@@ -180,6 +183,7 @@ func (br *BalancingRule) Build(ohm outbound.Manager, dispatcher routing.Dispatch
 		fallthrough
 	case "":
 		return &Balancer{
+			tag:         br.Tag,
 			selectors:   br.OutboundSelector,
 			ohm:         ohm,
 			fallbackTag: br.FallbackTag,
