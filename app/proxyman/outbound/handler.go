@@ -187,8 +187,16 @@ func (h *Handler) Tag() string {
 func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 	ctx = session.ContextWithBalancerRetryState(ctx)
 	ctx = session.ContextWithFullHandler(ctx, h)
+	replayRecorder := newRequestReplayRecorder()
+	ctx = contextWithRequestReplayRecorder(ctx, replayRecorder)
+	if snapshot, ok := session.GetBalancerRetrySnapshot(ctx); ok &&
+		snapshot.Kind == session.BalancerSelectionKindRoute &&
+		snapshot.RetryOwnerTag == h.tag &&
+		snapshot.SelectedOutboundTag != "" {
+		replayRecorder.Enable()
+	}
 
-	countedReader := newCountingReader(link.Reader)
+	countedReader := newCountingReader(link.Reader, replayRecorder)
 	countedWriter := newCountingWriter(link.Writer)
 	attemptLink := &transport.Link{
 		Reader: countedReader,
@@ -218,13 +226,6 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 		common.Interrupt(link.Writer)
 		common.Interrupt(link.Reader)
 		return
-	}
-
-	if h.shouldTreatCompletionWithoutResponseAsFailure(ctx, countedWriter.BytesWritten()) {
-		wrappedErr := errors.New("outbound completed without response")
-		if h.handleBalancerFailure(ctx, link.Writer, countedReader, wrappedErr, countedReader.BytesRead(), countedWriter.BytesWritten(), true) {
-			return
-		}
 	}
 
 	if errC != nil && goerrors.Is(errC, io.ErrClosedPipe) {
