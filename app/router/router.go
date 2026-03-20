@@ -105,7 +105,11 @@ func (r *Router) PickRoute(ctx routing.Context) (routing.Route, error) {
 	if rule.Webhook != nil {
 		rule.Webhook.Fire(originalCtx, tag)
 	}
-	return &Route{Context: ctx, outboundTag: tag, ruleTag: rule.RuleTag}, nil
+	route := &Route{Context: ctx, outboundTag: tag, ruleTag: rule.RuleTag}
+	if rule.Balancer != nil && rule.Balancer.tag != "" {
+		route.outboundGroupTags = []string{rule.Balancer.tag}
+	}
+	return route, nil
 }
 
 // AddRule implements routing.Router.

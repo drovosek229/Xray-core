@@ -18,6 +18,16 @@ type BurstObservatory interface {
 	Check(tag []string)
 }
 
+type ObservatoryFeedback interface {
+	features.Feature
+
+	RecordOutboundFailure(ctx context.Context, outboundTag, reason string)
+}
+
 func ObservatoryType() interface{} {
 	return (*Observatory)(nil)
+}
+
+func ObservatoryFeedbackType() interface{} {
+	return (*ObservatoryFeedback)(nil)
 }

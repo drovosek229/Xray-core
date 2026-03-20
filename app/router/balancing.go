@@ -31,12 +31,14 @@ type RoundRobinStrategy struct {
 
 func (s *RoundRobinStrategy) InjectContext(ctx context.Context) {
 	s.ctx = ctx
-	if len(s.FallbackTag) > 0 {
-		common.Must(core.RequireFeatures(s.ctx, func(observatory extension.Observatory) error {
-			s.observatory = observatory
-			return nil
-		}))
+	if core.FromContext(ctx) == nil {
+		s.observatory = nil
+		return
 	}
+	common.Must(core.OptionalFeatures(s.ctx, func(observatory extension.Observatory) error {
+		s.observatory = observatory
+		return nil
+	}))
 }
 
 func (s *RoundRobinStrategy) GetPrincipleTarget(strings []string) []string {
@@ -83,6 +85,7 @@ func (s *RoundRobinStrategy) PickOutbound(tags []string) string {
 }
 
 type Balancer struct {
+	tag         string
 	selectors   []string
 	strategy    BalancingStrategy
 	ohm         outbound.Manager
@@ -93,6 +96,11 @@ type Balancer struct {
 
 // PickOutbound picks the tag of a outbound
 func (b *Balancer) PickOutbound() (string, error) {
+	return b.PickOutboundExcluding(nil)
+}
+
+// PickOutboundExcluding picks the tag of an outbound while skipping excluded candidates.
+func (b *Balancer) PickOutboundExcluding(excluded []string) (string, error) {
 	candidates, err := b.SelectOutbounds()
 	if err != nil {
 		if b.fallbackTag != "" {
@@ -101,11 +109,12 @@ func (b *Balancer) PickOutbound() (string, error) {
 		}
 		return "", err
 	}
+	filtered := filterExcludedOutbounds(candidates, excluded)
 	var tag string
-	if o := b.override.Get(); o != "" {
+	if o := b.override.Get(); o != "" && !isExcludedOutbound(o, excluded) {
 		tag = o
 	} else {
-		tag = b.strategy.PickOutbound(candidates)
+		tag = b.strategy.PickOutbound(filtered)
 	}
 	if tag == "" {
 		if b.fallbackTag != "" {
@@ -116,6 +125,35 @@ func (b *Balancer) PickOutbound() (string, error) {
 		return "", errors.New("balancing strategy returns empty tag")
 	}
 	return tag, nil
+}
+
+func filterExcludedOutbounds(candidates []string, excluded []string) []string {
+	if len(candidates) == 0 || len(excluded) == 0 {
+		return candidates
+	}
+
+	excludedSet := make(map[string]struct{}, len(excluded))
+	for _, tag := range excluded {
+		excludedSet[tag] = struct{}{}
+	}
+
+	filtered := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if _, found := excludedSet[candidate]; found {
+			continue
+		}
+		filtered = append(filtered, candidate)
+	}
+	return filtered
+}
+
+func isExcludedOutbound(candidate string, excluded []string) bool {
+	for _, tag := range excluded {
+		if tag == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *Balancer) InjectContext(ctx context.Context) {
@@ -138,6 +176,15 @@ func (b *Balancer) SelectOutbounds() ([]string, error) {
 func (r *Router) PickBalancerOutbound(tag string) (string, bool, error) {
 	if b, ok := r.balancers[tag]; ok {
 		outboundTag, err := b.PickOutbound()
+		return outboundTag, true, err
+	}
+	return "", false, nil
+}
+
+// PickBalancerOutboundExcluding implements routing.BalancerSelectorEx.
+func (r *Router) PickBalancerOutboundExcluding(tag string, excluded []string) (string, bool, error) {
+	if b, ok := r.balancers[tag]; ok {
+		outboundTag, err := b.PickOutboundExcluding(excluded)
 		return outboundTag, true, err
 	}
 	return "", false, nil

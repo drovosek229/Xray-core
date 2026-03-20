@@ -148,7 +148,20 @@ func resolveDialerProxy(ctx context.Context, tag string) (string, outbound.Handl
 	}
 
 	if routingBalancer != nil {
-		resolvedTag, found, err := routingBalancer.PickBalancerOutbound(tag)
+		var (
+			resolvedTag string
+			found       bool
+			err         error
+		)
+		excluded := []string(nil)
+		if snapshot, ok := session.GetBalancerRetrySnapshot(ctx); ok && snapshot.Kind == session.BalancerSelectionKindDialerProxy && snapshot.BalancerTag == tag {
+			excluded = snapshot.ExcludedOutboundTags
+		}
+		if selectorEx, ok := routingBalancer.(routing.BalancerSelectorEx); ok && len(excluded) > 0 {
+			resolvedTag, found, err = selectorEx.PickBalancerOutboundExcluding(tag, excluded)
+		} else {
+			resolvedTag, found, err = routingBalancer.PickBalancerOutbound(tag)
+		}
 		if found {
 			if err != nil {
 				return "", nil, errors.New("failed to get outbound from dialerProxy balancer ", tag).Base(err).AtError()
@@ -160,6 +173,11 @@ func resolveDialerProxy(ctx context.Context, tag string) (string, outbound.Handl
 			if h == nil {
 				return "", nil, errors.New("there is no outbound handler for dialerProxy balancer target ", resolvedTag).AtError()
 			}
+			retryOwnerTag := ""
+			if handler := session.FullHandlerFromContext(ctx); handler != nil {
+				retryOwnerTag = handler.Tag()
+			}
+			session.UpdateBalancerSelection(ctx, session.BalancerSelectionKindDialerProxy, tag, retryOwnerTag, resolvedTag)
 			errors.LogInfo(ctx, "resolved dialerProxy balancer ", tag, " to outbound ", resolvedTag)
 			return resolvedTag, h, nil
 		}
