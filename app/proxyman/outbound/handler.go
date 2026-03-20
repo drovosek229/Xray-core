@@ -20,8 +20,10 @@ import (
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/features/extension"
 	"github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/features/policy"
+	"github.com/xtls/xray-core/features/routing"
 	"github.com/xtls/xray-core/features/stats"
 	"github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/transport"
@@ -59,17 +61,21 @@ func getStatCounter(v *core.Instance, tag string) (stats.Counter, stats.Counter)
 
 // Handler implements outbound.Handler.
 type Handler struct {
-	tag             string
-	senderSettings  *proxyman.SenderConfig
-	streamSettings  *internet.MemoryStreamConfig
-	proxyConfig     proto.Message
-	proxy           proxy.Outbound
-	outboundManager outbound.Manager
-	mux             *mux.ClientManager
-	xudp            *mux.ClientManager
-	udp443          string
-	uplinkCounter   stats.Counter
-	downlinkCounter stats.Counter
+	tag                 string
+	server              *core.Instance
+	senderSettings      *proxyman.SenderConfig
+	streamSettings      *internet.MemoryStreamConfig
+	proxyConfig         proto.Message
+	proxy               proxy.Outbound
+	outboundManager     outbound.Manager
+	mux                 *mux.ClientManager
+	xudp                *mux.ClientManager
+	udp443              string
+	uplinkCounter       stats.Counter
+	downlinkCounter     stats.Counter
+	observatoryFeedback extension.ObservatoryFeedback
+	balancerSelector    routing.BalancerSelector
+	balancerSelectorEx  routing.BalancerSelectorEx
 }
 
 // NewHandler creates a new Handler based on the given configuration.
@@ -78,6 +84,7 @@ func NewHandler(ctx context.Context, config *core.OutboundHandlerConfig) (outbou
 	uplinkCounter, downlinkCounter := getStatCounter(v, config.Tag)
 	h := &Handler{
 		tag:             config.Tag,
+		server:          v,
 		outboundManager: v.GetFeature(outbound.ManagerType()).(outbound.Manager),
 		uplinkCounter:   uplinkCounter,
 		downlinkCounter: downlinkCounter,
@@ -178,6 +185,57 @@ func (h *Handler) Tag() string {
 
 // Dispatch implements proxy.Outbound.Dispatch.
 func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
+	ctx = session.ContextWithBalancerRetryState(ctx)
+	ctx = session.ContextWithFullHandler(ctx, h)
+
+	countedReader := newCountingReader(link.Reader)
+	countedWriter := newCountingWriter(link.Writer)
+	attemptLink := &transport.Link{
+		Reader: countedReader,
+		Writer: countedWriter,
+	}
+
+	err, errC := h.dispatchOnce(ctx, attemptLink)
+	if err != nil {
+		if errC != nil && (goerrors.Is(errC, io.EOF) || goerrors.Is(errC, io.ErrClosedPipe) || goerrors.Is(errC, context.Canceled)) &&
+			!h.shouldTreatBenignErrorAsFailure(ctx, errC, countedReader.BytesRead(), countedWriter.BytesWritten()) {
+			if goerrors.Is(errC, io.ErrClosedPipe) {
+				common.Interrupt(link.Writer)
+			} else {
+				common.Close(link.Writer)
+			}
+			common.Interrupt(link.Reader)
+			return
+		}
+
+		wrappedErr := errors.New("failed to process outbound traffic").Base(err)
+		allowConsumedRequest := countedReader.BytesRead() == 0 || goerrors.Is(errC, io.EOF) || goerrors.Is(errC, context.Canceled)
+		if h.handleBalancerFailure(ctx, link.Writer, countedReader, wrappedErr, countedReader.BytesRead(), countedWriter.BytesWritten(), allowConsumedRequest) {
+			return
+		}
+		session.SubmitOutboundErrorToOriginator(ctx, wrappedErr)
+		errors.LogInfo(ctx, wrappedErr.Error())
+		common.Interrupt(link.Writer)
+		common.Interrupt(link.Reader)
+		return
+	}
+
+	if h.shouldTreatCompletionWithoutResponseAsFailure(ctx, countedWriter.BytesWritten()) {
+		wrappedErr := errors.New("outbound completed without response")
+		if h.handleBalancerFailure(ctx, link.Writer, countedReader, wrappedErr, countedReader.BytesRead(), countedWriter.BytesWritten(), true) {
+			return
+		}
+	}
+
+	if errC != nil && goerrors.Is(errC, io.ErrClosedPipe) {
+		common.Interrupt(link.Writer)
+	} else {
+		common.Close(link.Writer)
+	}
+	common.Interrupt(link.Reader)
+}
+
+func (h *Handler) dispatchOnce(ctx context.Context, link *transport.Link) (error, error) {
 	outbounds := session.OutboundsFromContext(ctx)
 	ob := outbounds[len(outbounds)-1]
 	content := session.ContentFromContext(ctx)
@@ -194,7 +252,7 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 				session.SubmitOutboundErrorToOriginator(ctx, err)
 				common.Interrupt(link.Writer)
 				common.Interrupt(link.Reader)
-				return
+				return err, nil
 			}
 
 		} else {
@@ -208,20 +266,17 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 		link.Writer = &buf.EndpointOverrideWriter{Writer: link.Writer, Dest: ob.Target.Address, OriginalDest: ob.OriginalTarget.Address}
 	}
 	if h.mux != nil {
+		var muxErr error
 		test := func(err error) {
 			if err != nil {
-				err := errors.New("failed to process mux outbound traffic").Base(err)
-				session.SubmitOutboundErrorToOriginator(ctx, err)
-				errors.LogInfo(ctx, err.Error())
-				common.Interrupt(link.Writer)
-				common.Interrupt(link.Reader)
+				muxErr = errors.New("failed to process mux outbound traffic").Base(err)
 			}
 		}
 		if ob.Target.Network == net.Network_UDP && ob.Target.Port == 443 {
 			switch h.udp443 {
 			case "reject":
 				test(errors.New("XUDP rejected UDP/443 traffic").AtInfo())
-				return
+				return muxErr, nil
 			case "skip":
 				goto out
 			}
@@ -231,11 +286,11 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 				goto out
 			}
 			test(h.xudp.Dispatch(ctx, link))
-			return
+			return muxErr, nil
 		}
 		if h.mux.Enabled {
 			test(h.mux.Dispatch(ctx, link))
-			return
+			return muxErr, nil
 		}
 	}
 out:
@@ -243,24 +298,8 @@ out:
 	var errC error
 	if err != nil {
 		errC = errors.Cause(err)
-		if goerrors.Is(errC, io.EOF) || goerrors.Is(errC, io.ErrClosedPipe) || goerrors.Is(errC, context.Canceled) {
-			err = nil
-		}
 	}
-	if err != nil {
-		// Ensure outbound ray is properly closed.
-		err := errors.New("failed to process outbound traffic").Base(err)
-		session.SubmitOutboundErrorToOriginator(ctx, err)
-		errors.LogInfo(ctx, err.Error())
-		common.Interrupt(link.Writer)
-	} else {
-		if errC != nil && goerrors.Is(errC, io.ErrClosedPipe) {
-			common.Interrupt(link.Writer)
-		} else {
-			common.Close(link.Writer)
-		}
-	}
-	common.Interrupt(link.Reader)
+	return err, errC
 }
 
 func (h *Handler) DestIpAddress() net.IP {
@@ -274,31 +313,30 @@ func (h *Handler) Dial(ctx context.Context, dest net.Destination) (stat.Connecti
 		if h.senderSettings.ProxySettings.HasTag() {
 
 			tag := h.senderSettings.ProxySettings.Tag
-			handler := h.outboundManager.GetHandler(tag)
-			if handler != nil {
-				errors.LogDebug(ctx, "proxying to ", tag, " for dest ", dest)
-				outbounds := session.OutboundsFromContext(ctx)
-				ctx = session.ContextWithOutbounds(ctx, append(outbounds, &session.Outbound{
-					Target: dest,
-					Tag:    tag,
-				})) // add another outbound in session ctx
-				opts := pipe.OptionsFromContext(ctx)
-				uplinkReader, uplinkWriter := pipe.New(opts...)
-				downlinkReader, downlinkWriter := pipe.New(opts...)
+			resolvedTag, handler, err := h.resolveProxyTarget(ctx, tag)
+			if err != nil {
+				errors.LogError(ctx, err.Error())
+				return nil, err
+			}
+			errors.LogDebug(ctx, "proxying to ", resolvedTag, " for dest ", dest)
+			outbounds := session.OutboundsFromContext(ctx)
+			ctx = session.ContextWithOutbounds(ctx, append(outbounds, &session.Outbound{
+				Target: dest,
+				Tag:    resolvedTag,
+			})) // add another outbound in session ctx
+			opts := pipe.OptionsFromContext(ctx)
+			uplinkReader, uplinkWriter := pipe.New(opts...)
+			downlinkReader, downlinkWriter := pipe.New(opts...)
 
-				go handler.Dispatch(ctx, &transport.Link{Reader: uplinkReader, Writer: downlinkWriter})
-				conn := cnc.NewConnection(cnc.ConnectionInputMulti(uplinkWriter), cnc.ConnectionOutputMulti(downlinkReader))
+			go handler.Dispatch(ctx, &transport.Link{Reader: uplinkReader, Writer: downlinkWriter})
+			conn := cnc.NewConnection(cnc.ConnectionInputMulti(uplinkWriter), cnc.ConnectionOutputMulti(downlinkReader))
 
-				if config := tls.ConfigFromStreamSettings(h.streamSettings); config != nil {
-					tlsConfig := config.GetTLSConfig(tls.WithDestination(dest))
-					conn = tls.Client(conn, tlsConfig)
-				}
-
-				return h.getStatCouterConnection(conn), nil
+			if config := tls.ConfigFromStreamSettings(h.streamSettings); config != nil {
+				tlsConfig := config.GetTLSConfig(tls.WithDestination(dest))
+				conn = tls.Client(conn, tlsConfig)
 			}
 
-			errors.LogError(ctx, "failed to get outbound handler with tag: ", tag)
-			return nil, errors.New("failed to get outbound handler with tag: " + tag)
+			return h.getStatCouterConnection(conn), nil
 		}
 
 		if h.senderSettings.Via != nil {
@@ -371,6 +409,51 @@ func (h *Handler) getStatCouterConnection(conn stat.Connection) stat.Connection 
 // GetOutbound implements proxy.GetOutbound.
 func (h *Handler) GetOutbound() proxy.Outbound {
 	return h.proxy
+}
+
+func (h *Handler) observatoryFeedbackFromContext(ctx context.Context) extension.ObservatoryFeedback {
+	if h.observatoryFeedback != nil {
+		return h.observatoryFeedback
+	}
+
+	server := h.server
+	if server == nil {
+		server = core.FromContext(ctx)
+	}
+	if server == nil {
+		return nil
+	}
+
+	observatory, _ := server.GetFeature(extension.ObservatoryType()).(extension.Observatory)
+	feedback, _ := observatory.(extension.ObservatoryFeedback)
+	return feedback
+}
+
+func (h *Handler) balancerSelectorFromContext(ctx context.Context) routing.BalancerSelector {
+	if h.balancerSelector != nil {
+		return h.balancerSelector
+	}
+
+	server := h.server
+	if server == nil {
+		server = core.FromContext(ctx)
+	}
+	if server == nil {
+		return nil
+	}
+
+	selector, _ := server.GetFeature(routing.RouterType()).(routing.BalancerSelector)
+	return selector
+}
+
+func (h *Handler) balancerSelectorExFromContext(ctx context.Context) routing.BalancerSelectorEx {
+	if h.balancerSelectorEx != nil {
+		return h.balancerSelectorEx
+	}
+
+	selector := h.balancerSelectorFromContext(ctx)
+	selectorEx, _ := selector.(routing.BalancerSelectorEx)
+	return selectorEx
 }
 
 // Start implements common.Runnable.
