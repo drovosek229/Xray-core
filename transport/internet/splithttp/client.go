@@ -299,14 +299,12 @@ func (w *WaitReadCloser) Read(b []byte) (int, error) {
 	if w.Wait != nil {
 		<-w.Wait
 	}
-
-	w.mu.Lock()
-	reader := w.reader
-	w.mu.Unlock()
-	if reader == nil {
+	// Channel close in signalReady publishes reader/closed state to waiters, so
+	// the hot read path doesn't need to take the mutex after readiness.
+	if w.reader == nil {
 		return 0, io.ErrClosedPipe
 	}
-	return reader.Read(b)
+	return w.reader.Read(b)
 }
 
 func (w *WaitReadCloser) Close() error {
