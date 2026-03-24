@@ -207,14 +207,15 @@ func (c *InboundDetourConfig) Build() (*core.InboundHandlerConfig, error) {
 }
 
 type OutboundDetourConfig struct {
-	Protocol       string           `json:"protocol"`
-	SendThrough    *string          `json:"sendThrough"`
-	Tag            string           `json:"tag"`
-	Settings       *json.RawMessage `json:"settings"`
-	StreamSetting  *StreamConfig    `json:"streamSettings"`
-	ProxySettings  *ProxyConfig     `json:"proxySettings"`
-	MuxSettings    *MuxConfig       `json:"mux"`
-	TargetStrategy string           `json:"targetStrategy"`
+	Protocol          string           `json:"protocol"`
+	SendThrough       *string          `json:"sendThrough"`
+	Tag               string           `json:"tag"`
+	Settings          *json.RawMessage `json:"settings"`
+	StreamSetting     *StreamConfig    `json:"streamSettings"`
+	ProxySettings     *ProxyConfig     `json:"proxySettings"`
+	MuxSettings       *MuxConfig       `json:"mux"`
+	TargetStrategy    string           `json:"targetStrategy"`
+	RetryReplayPolicy string           `json:"retryReplayPolicy"`
 }
 
 func (c *OutboundDetourConfig) checkChainProxyConfig() error {
@@ -255,6 +256,14 @@ func (c *OutboundDetourConfig) Build() (*core.OutboundHandlerConfig, error) {
 		senderSettings.TargetStrategy = internet.DomainStrategy_FORCE_IP64
 	default:
 		return nil, errors.New("unsupported target domain strategy: ", c.TargetStrategy)
+	}
+	switch c.RetryReplayPolicy {
+	case "", "zeroByteOnly":
+		senderSettings.RetryReplayPolicy = proxyman.RetryReplayPolicy_ZERO_BYTE_ONLY
+	case "legacyConsumedBenign":
+		senderSettings.RetryReplayPolicy = proxyman.RetryReplayPolicy_LEGACY_CONSUMED_BENIGN
+	default:
+		return nil, errors.New("unsupported retry replay policy: ", c.RetryReplayPolicy)
 	}
 	if err := c.checkChainProxyConfig(); err != nil {
 		return nil, err

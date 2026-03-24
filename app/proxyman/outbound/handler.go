@@ -189,10 +189,7 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 	ctx = session.ContextWithFullHandler(ctx, h)
 	replayRecorder := newRequestReplayRecorder()
 	ctx = contextWithRequestReplayRecorder(ctx, replayRecorder)
-	if snapshot, ok := session.GetBalancerRetrySnapshot(ctx); ok &&
-		snapshot.Kind == session.BalancerSelectionKindRoute &&
-		snapshot.RetryOwnerTag == h.tag &&
-		snapshot.SelectedOutboundTag != "" {
+	if h.shouldEnableRequestReplay(ctx) {
 		replayRecorder.Enable()
 	}
 
@@ -205,8 +202,9 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 
 	err, errC := h.dispatchOnce(ctx, attemptLink)
 	if err != nil {
+		failureClassification := h.classifyBalancerFailure(ctx, errC, countedReader.BytesRead(), countedWriter.BytesWritten())
 		if errC != nil && (goerrors.Is(errC, io.EOF) || goerrors.Is(errC, io.ErrClosedPipe) || goerrors.Is(errC, context.Canceled)) &&
-			!h.shouldTreatBenignErrorAsFailure(ctx, errC, countedReader.BytesRead(), countedWriter.BytesWritten()) {
+			!failureClassification.shouldTreatBenignErrorAsFailure() {
 			if goerrors.Is(errC, io.ErrClosedPipe) {
 				common.Interrupt(link.Writer)
 			} else {
@@ -217,8 +215,7 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 		}
 
 		wrappedErr := errors.New("failed to process outbound traffic").Base(err)
-		allowConsumedRequest := countedReader.BytesRead() == 0 || goerrors.Is(errC, io.EOF) || goerrors.Is(errC, context.Canceled)
-		if h.handleBalancerFailure(ctx, link.Writer, countedReader, wrappedErr, countedReader.BytesRead(), countedWriter.BytesWritten(), allowConsumedRequest) {
+		if h.handleBalancerFailure(ctx, link.Writer, countedReader, wrappedErr, failureClassification) {
 			return
 		}
 		session.SubmitOutboundErrorToOriginator(ctx, wrappedErr)
@@ -234,6 +231,23 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 		common.Close(link.Writer)
 	}
 	common.Interrupt(link.Reader)
+}
+
+func (h *Handler) shouldEnableRequestReplay(ctx context.Context) bool {
+	if snapshot, ok := session.GetBalancerRetrySnapshot(ctx); ok &&
+		snapshot.Kind == session.BalancerSelectionKindRoute &&
+		snapshot.RetryOwnerTag == h.tag &&
+		snapshot.SelectedOutboundTag != "" {
+		return true
+	}
+
+	if h.senderSettings != nil && h.senderSettings.ProxySettings != nil && h.senderSettings.ProxySettings.HasTag() {
+		return true
+	}
+
+	return h.streamSettings != nil &&
+		h.streamSettings.SocketSettings != nil &&
+		len(h.streamSettings.SocketSettings.DialerProxy) > 0
 }
 
 func (h *Handler) dispatchOnce(ctx context.Context, link *transport.Link) (error, error) {

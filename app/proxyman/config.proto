@@ -49,6 +49,11 @@ message InboundHandlerConfig {
 
 message OutboundConfig {}
 
+enum RetryReplayPolicy {
+  ZERO_BYTE_ONLY = 0;
+  LEGACY_CONSUMED_BENIGN = 1;
+}
+
 message SenderConfig {
   // Send traffic through the given IP. Only IP is allowed.
   xray.common.net.IPOrDomain via = 1;
@@ -57,6 +62,7 @@ message SenderConfig {
   MultiplexingConfig multiplex_settings = 4;
   string via_cidr = 5;
   xray.transport.internet.DomainStrategy target_strategy = 6;
+  RetryReplayPolicy retry_replay_policy = 7;
 }
 
 message MultiplexingConfig {

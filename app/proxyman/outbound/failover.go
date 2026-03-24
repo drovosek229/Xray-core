@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
@@ -15,6 +16,15 @@ import (
 )
 
 const requestReplayLimitBytes int64 = 128 * 1024
+
+type balancerFailureClassification int
+
+const (
+	balancerFailureClassificationNone balancerFailureClassification = iota
+	balancerFailureClassificationZeroByteReplay
+	balancerFailureClassificationRequestConsumed
+	balancerFailureClassificationLegacyConsumedReplay
+)
 
 type requestReplayRecorderKey struct{}
 
@@ -219,12 +229,49 @@ func (w *countingWriter) BytesWritten() int64 {
 	return w.bytesWritten
 }
 
-func (h *Handler) handleBalancerFailure(ctx context.Context, writer buf.Writer, requestReader *countingReader, err error, requestBytesRead, responseBytesWritten int64, allowConsumedRequest bool) bool {
+func (c balancerFailureClassification) shouldTreatBenignErrorAsFailure() bool {
+	return c != balancerFailureClassificationNone
+}
+
+func (c balancerFailureClassification) allowsReplay() bool {
+	return c == balancerFailureClassificationZeroByteReplay || c == balancerFailureClassificationLegacyConsumedReplay
+}
+
+func (h *Handler) retryReplayPolicy() proxyman.RetryReplayPolicy {
+	if h.senderSettings == nil {
+		return proxyman.RetryReplayPolicy_ZERO_BYTE_ONLY
+	}
+	return h.senderSettings.GetRetryReplayPolicy()
+}
+
+func (h *Handler) classifyBalancerFailure(ctx context.Context, err error, requestBytesRead, responseBytesWritten int64) balancerFailureClassification {
+	if ctx.Err() != nil || responseBytesWritten != 0 {
+		return balancerFailureClassificationNone
+	}
+
+	snapshot, ok := session.GetBalancerRetrySnapshot(ctx)
+	if !ok || snapshot.SelectedOutboundTag == "" {
+		return balancerFailureClassificationNone
+	}
+
+	if requestBytesRead == 0 {
+		return balancerFailureClassificationZeroByteReplay
+	}
+
+	if h.retryReplayPolicy() == proxyman.RetryReplayPolicy_LEGACY_CONSUMED_BENIGN &&
+		(goerrors.Is(err, io.EOF) || goerrors.Is(err, context.Canceled)) {
+		return balancerFailureClassificationLegacyConsumedReplay
+	}
+
+	return balancerFailureClassificationRequestConsumed
+}
+
+func (h *Handler) handleBalancerFailure(ctx context.Context, writer buf.Writer, requestReader *countingReader, err error, classification balancerFailureClassification) bool {
 	snapshot, ok := session.GetBalancerRetrySnapshot(ctx)
 	if !ok || snapshot.SelectedOutboundTag == "" {
 		return false
 	}
-	if ctx.Err() != nil || responseBytesWritten != 0 {
+	if classification == balancerFailureClassificationNone {
 		return false
 	}
 
@@ -234,7 +281,11 @@ func (h *Handler) handleBalancerFailure(ctx context.Context, writer buf.Writer, 
 		}
 	}
 
-	if snapshot.Retried || snapshot.RetryOwnerTag != h.tag || requestReader == nil || !requestReader.CanReplay() || (!allowConsumedRequest && requestBytesRead != 0) {
+	if snapshot.RetryOwnerTag == h.tag && classification == balancerFailureClassificationRequestConsumed {
+		errors.LogInfo(ctx, "replay denied for outbound [", snapshot.SelectedOutboundTag, "]: request was already consumed")
+	}
+
+	if snapshot.Retried || snapshot.RetryOwnerTag != h.tag || requestReader == nil || !requestReader.CanReplay() || !classification.allowsReplay() {
 		return false
 	}
 
@@ -252,6 +303,15 @@ func (h *Handler) handleBalancerFailure(ctx context.Context, writer buf.Writer, 
 		return false
 	}
 
+	switch classification {
+	case balancerFailureClassificationZeroByteReplay:
+		errors.LogInfo(ctx, "replay allowed for outbound [", snapshot.SelectedOutboundTag, "]: zero-byte failure")
+	case balancerFailureClassificationLegacyConsumedReplay:
+		errors.LogInfo(ctx, "replay allowed for outbound [", snapshot.SelectedOutboundTag, "]: legacy consumed benign policy configured")
+	default:
+		return false
+	}
+
 	switch updatedSnapshot.Kind {
 	case session.BalancerSelectionKindRoute:
 		return h.retryRouteBalancer(ctx, writer, replayReader, updatedSnapshot)
@@ -265,20 +325,6 @@ func (h *Handler) handleBalancerFailure(ctx context.Context, writer buf.Writer, 
 	default:
 		return false
 	}
-}
-
-func (h *Handler) shouldTreatBenignErrorAsFailure(ctx context.Context, err error, requestBytesRead, responseBytesWritten int64) bool {
-	if ctx.Err() != nil || responseBytesWritten != 0 {
-		return false
-	}
-	snapshot, ok := session.GetBalancerRetrySnapshot(ctx)
-	if !ok || snapshot.SelectedOutboundTag == "" {
-		return false
-	}
-	if requestBytesRead == 0 {
-		return true
-	}
-	return goerrors.Is(err, io.EOF) || goerrors.Is(err, context.Canceled)
 }
 
 func (h *Handler) retryRouteBalancer(ctx context.Context, writer buf.Writer, replayReader buf.Reader, snapshot session.BalancerRetrySnapshot) bool {

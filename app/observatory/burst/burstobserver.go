@@ -17,6 +17,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const runtimeFailureReprobeDelay = 250 * time.Millisecond
+
 type Observer struct {
 	config *Config
 	ctx    context.Context
@@ -25,6 +27,11 @@ type Observer struct {
 	status     []*observatory.OutboundStatus
 	failures   map[string]liveFailure
 	hp         *HealthPing
+
+	reprobeLock    sync.Mutex
+	pendingReprobe map[string]struct{}
+	reprobeDelay   time.Duration
+	reprobeFn      func(string) (time.Duration, error)
 
 	finished *done.Instance
 
@@ -137,6 +144,11 @@ func (o *Observer) RecordOutboundFailure(ctx context.Context, outboundTag, reaso
 		reason = "runtime request failed"
 	}
 
+	o.setLiveFailure(outboundTag, reason)
+	o.scheduleFailureReprobe(outboundTag)
+}
+
+func (o *Observer) setLiveFailure(outboundTag, reason string) {
 	o.statusLock.Lock()
 	defer o.statusLock.Unlock()
 	if o.failures == nil {
@@ -146,6 +158,107 @@ func (o *Observer) RecordOutboundFailure(ctx context.Context, outboundTag, reaso
 		lastErrorReason: reason,
 		lastTryTime:     time.Now().Unix(),
 	}
+}
+
+func (o *Observer) clearLiveFailure(outboundTag string) {
+	o.statusLock.Lock()
+	defer o.statusLock.Unlock()
+	if len(o.failures) == 0 {
+		return
+	}
+	delete(o.failures, outboundTag)
+}
+
+func (o *Observer) scheduleFailureReprobe(outboundTag string) {
+	if !o.canRunFailureReprobe() {
+		return
+	}
+	if o.finished != nil && o.finished.Done() {
+		return
+	}
+
+	o.reprobeLock.Lock()
+	if o.pendingReprobe == nil {
+		o.pendingReprobe = make(map[string]struct{})
+	}
+	if _, found := o.pendingReprobe[outboundTag]; found {
+		o.reprobeLock.Unlock()
+		return
+	}
+	o.pendingReprobe[outboundTag] = struct{}{}
+	o.reprobeLock.Unlock()
+
+	go o.runFailureReprobe(outboundTag)
+}
+
+func (o *Observer) canRunFailureReprobe() bool {
+	return o.hp != nil && o.hp.Settings != nil
+}
+
+func (o *Observer) runFailureReprobe(outboundTag string) {
+	defer o.finishFailureReprobe(outboundTag)
+
+	if !o.waitForFailureReprobeDelay() {
+		return
+	}
+
+	delay, err := o.probeFailureOutbound(outboundTag)
+	if err != nil {
+		o.hp.PutResult(outboundTag, rttFailed)
+		o.setLiveFailure(outboundTag, "burst reprobe failed: "+err.Error())
+		o.refreshSnapshot()
+		return
+	}
+
+	o.hp.PutResult(outboundTag, delay)
+	o.clearLiveFailure(outboundTag)
+	o.refreshSnapshot()
+}
+
+func (o *Observer) finishFailureReprobe(outboundTag string) {
+	o.reprobeLock.Lock()
+	defer o.reprobeLock.Unlock()
+	if len(o.pendingReprobe) == 0 {
+		return
+	}
+	delete(o.pendingReprobe, outboundTag)
+}
+
+func (o *Observer) waitForFailureReprobeDelay() bool {
+	delay := o.reprobeDelay
+	if delay <= 0 {
+		delay = runtimeFailureReprobeDelay
+	}
+	if delay <= 0 {
+		return true
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return true
+	case <-o.doneWait():
+		return false
+	}
+}
+
+func (o *Observer) doneWait() <-chan struct{} {
+	if o.finished == nil {
+		return nil
+	}
+	return o.finished.Wait()
+}
+
+func (o *Observer) probeFailureOutbound(outboundTag string) (time.Duration, error) {
+	if o.reprobeFn != nil {
+		return o.reprobeFn(outboundTag)
+	}
+	if o.hp == nil {
+		return 0, errors.New("health ping is not initialized")
+	}
+	return o.hp.MeasureDelay(outboundTag)
 }
 
 func cloneObservationStatuses(statuses []*observatory.OutboundStatus) []*observatory.OutboundStatus {
