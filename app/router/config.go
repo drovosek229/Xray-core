@@ -179,6 +179,23 @@ func (br *BalancingRule) Build(ohm outbound.Manager, dispatcher routing.Dispatch
 			fallbackTag: br.FallbackTag,
 			strategy:    leastLoadStrategy,
 		}, nil
+	case "moststable":
+		i, err := br.StrategySettings.GetInstance()
+		if err != nil {
+			return nil, err
+		}
+		s, ok := i.(*StrategyMostStableConfig)
+		if !ok {
+			return nil, errors.New("not a StrategyMostStableConfig").AtError()
+		}
+		mostStableStrategy := NewMostStableStrategy(s, br.FallbackTag)
+		return &Balancer{
+			tag:         br.Tag,
+			selectors:   br.OutboundSelector,
+			ohm:         ohm,
+			fallbackTag: br.FallbackTag,
+			strategy:    mostStableStrategy,
+		}, nil
 	case "random":
 		fallthrough
 	case "":

@@ -47,6 +47,9 @@ func TestLiveFailureOverlayMarksOutboundDeadImmediately(t *testing.T) {
 	if statuses[0].LastTryTime == 0 {
 		t.Fatal("expected LastTryTime to be refreshed")
 	}
+	if statuses[0].LastFailureTime == 0 {
+		t.Fatal("expected LastFailureTime to be recorded")
+	}
 }
 
 func TestSuccessfulProbeClearsLiveFailureOverlay(t *testing.T) {
@@ -77,6 +80,9 @@ func TestSuccessfulProbeClearsLiveFailureOverlay(t *testing.T) {
 	}
 	if statuses[0].LastErrorReason != "" {
 		t.Fatalf("expected failure reason to be cleared, got %q", statuses[0].LastErrorReason)
+	}
+	if statuses[0].LastFailureTime == 0 {
+		t.Fatal("expected LastFailureTime to persist after successful probe")
 	}
 }
 
@@ -156,7 +162,10 @@ func TestSuccessfulReprobeClearsLiveFailureOverlayAsynchronously(t *testing.T) {
 			return false
 		}
 		statuses := response.(*observatory.ObservationResult).Status
-		return len(statuses) == 1 && statuses[0].Alive && statuses[0].LastErrorReason == ""
+		return len(statuses) == 1 &&
+			statuses[0].Alive &&
+			statuses[0].LastErrorReason == "" &&
+			statuses[0].LastFailureTime != 0
 	}, "expected successful reprobe to restore node-a")
 }
 

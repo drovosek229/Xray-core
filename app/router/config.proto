@@ -154,6 +154,21 @@ message StrategyLeastLoadConfig {
   int32 softFailGrace = 8;
 }
 
+message StrategyMostStableConfig {
+  // weight settings
+  repeated StrategyWeight costs = 1;
+  // max acceptable rtt, filter away high delay nodes. default 0
+  int64 maxRTT = 2;
+  // acceptable failure rate. default 0.2
+  float tolerance = 3;
+  // minimum burst samples before a challenger can replace a healthy winner. default 4
+  int32 minSamples = 4;
+  // quarantine duration after runtime or observed failures. default 30s
+  int64 holdDown = 5;
+  // successful observation cycles required after hold-down before re-entry. default 2
+  int32 recoveryObservations = 6;
+}
+
 message Config {
   enum DomainStrategy {
     // Use domain as is.
