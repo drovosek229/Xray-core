@@ -262,6 +262,37 @@ func (h *HealthPing) runCheck(tags []string, duration time.Duration, rounds int)
 	h.doCheck(tags, duration, rounds)
 }
 
+func (h *HealthPing) MeasureDelay(tag string) (time.Duration, error) {
+	if h == nil || h.Settings == nil {
+		return 0, errors.New("health ping is not initialized")
+	}
+
+	client := newPingClient(
+		h.ctx,
+		h.dispatcher,
+		h.Settings.Destination,
+		h.Settings.Timeout,
+		tag,
+	)
+	delay, err := client.MeasureDelay(h.Settings.HttpMethod)
+	if err == nil {
+		return delay, nil
+	}
+
+	if !h.checkConnectivity() {
+		errors.LogWarning(h.ctx, "network is down")
+		return 0, errors.New("network is down").Base(err)
+	}
+
+	errors.LogWarning(h.ctx, fmt.Sprintf(
+		"error ping %s with %s: %s",
+		h.Settings.Destination,
+		tag,
+		err,
+	))
+	return 0, err
+}
+
 // PutResult put a ping rtt to results
 func (h *HealthPing) PutResult(tag string, rtt time.Duration) {
 	h.access.Lock()

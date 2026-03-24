@@ -3,6 +3,7 @@ package conf_test
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -194,6 +195,63 @@ func TestMuxConfig_Build(t *testing.T) {
 			common.Must(json.Unmarshal([]byte(tt.fields), m))
 			if got, _ := m.Build(); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("MuxConfig.Build() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOutboundDetourConfig_RetryReplayPolicy(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    proxyman.RetryReplayPolicy
+		wantErr string
+	}{
+		{
+			name:  "default",
+			input: `{"protocol":"freedom"}`,
+			want:  proxyman.RetryReplayPolicy_ZERO_BYTE_ONLY,
+		},
+		{
+			name:  "legacy",
+			input: `{"protocol":"freedom","retryReplayPolicy":"legacyConsumedBenign"}`,
+			want:  proxyman.RetryReplayPolicy_LEGACY_CONSUMED_BENIGN,
+		},
+		{
+			name:    "invalid",
+			input:   `{"protocol":"freedom","retryReplayPolicy":"LegacyConsumedBenign"}`,
+			wantErr: "unsupported retry replay policy",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := new(OutboundDetourConfig)
+			if err := json.Unmarshal([]byte(tt.input), config); err != nil {
+				t.Fatalf("failed to unmarshal outbound config: %v", err)
+			}
+
+			built, err := config.Build()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("failed to build outbound config: %v", err)
+			}
+
+			senderSettings, err := built.SenderSettings.GetInstance()
+			if err != nil {
+				t.Fatalf("failed to decode sender settings: %v", err)
+			}
+			senderConfig, ok := senderSettings.(*proxyman.SenderConfig)
+			if !ok {
+				t.Fatalf("unexpected sender settings type %T", senderSettings)
+			}
+			if got := senderConfig.GetRetryReplayPolicy(); got != tt.want {
+				t.Fatalf("unexpected retry replay policy: got %v, want %v", got, tt.want)
 			}
 		})
 	}

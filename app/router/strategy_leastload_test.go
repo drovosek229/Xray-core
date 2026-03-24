@@ -483,6 +483,35 @@ func TestLeastLoadSoftFailGraceBypassesDeadCurrentWinner(t *testing.T) {
 	}
 }
 
+func TestLeastLoadRecoveredOutboundBecomesSelectableImmediately(t *testing.T) {
+	strategy := NewLeastLoadStrategy(&StrategyLeastLoadConfig{Expected: 1, MinSamples: 0, SoftFailGrace: 0})
+	strategy.ctx = context.Background()
+	strategy.lastSelected = "node-a"
+	strategy.observer = &sequenceObservatory{
+		results: []proto.Message{
+			&observatory.ObservationResult{
+				Status: []*observatory.OutboundStatus{
+					{Alive: false, Delay: 99999999, OutboundTag: "node-a", LastTryTime: 100},
+					{Alive: true, Delay: 50, OutboundTag: "node-b", LastTryTime: 100},
+				},
+			},
+			&observatory.ObservationResult{
+				Status: []*observatory.OutboundStatus{
+					{Alive: true, Delay: 10, OutboundTag: "node-a", LastTryTime: 101},
+					{Alive: true, Delay: 50, OutboundTag: "node-b", LastTryTime: 101},
+				},
+			},
+		},
+	}
+
+	if got := strategy.PickOutbound([]string{"node-a", "node-b"}); got != "node-b" {
+		t.Fatalf("expected initial failure to switch to node-b, got %q", got)
+	}
+	if got := strategy.PickOutbound([]string{"node-a", "node-b"}); got != "node-a" {
+		t.Fatalf("expected recovered node-a to become selectable immediately, got %q", got)
+	}
+}
+
 func TestLeastLoadPrefersLowerFailRatioOverLowerRawFailCount(t *testing.T) {
 	strategy := NewLeastLoadStrategy(&StrategyLeastLoadConfig{Expected: 1})
 	strategy.ctx = context.Background()
