@@ -3,6 +3,7 @@ package conf
 import (
 	"google.golang.org/protobuf/proto"
 	"strings"
+	"time"
 
 	"github.com/xtls/xray-core/app/observatory/burst"
 	"github.com/xtls/xray-core/app/router"
@@ -14,6 +15,7 @@ const (
 	strategyLeastPing  string = "leastping"
 	strategyRoundRobin string = "roundrobin"
 	strategyLeastLoad  string = "leastload"
+	strategyMostStable string = "moststable"
 )
 
 var (
@@ -22,6 +24,7 @@ var (
 		strategyLeastPing:  func() interface{} { return new(strategyEmptyConfig) },
 		strategyRoundRobin: func() interface{} { return new(strategyEmptyConfig) },
 		strategyLeastLoad:  func() interface{} { return new(strategyLeastLoadConfig) },
+		strategyMostStable: func() interface{} { return new(strategyMostStableConfig) },
 	}, "type", "settings")
 )
 
@@ -47,6 +50,21 @@ type strategyLeastLoadConfig struct {
 	MinSamples int32 `json:"minSamples,omitempty"`
 	// consecutive soft-fail cycles allowed for the current winner
 	SoftFailGrace int32 `json:"softFailGrace,omitempty"`
+}
+
+type strategyMostStableConfig struct {
+	// weight settings
+	Costs []*router.StrategyWeight `json:"costs,omitempty"`
+	// max acceptable rtt, filter away high delay nodes. default 0
+	MaxRTT duration.Duration `json:"maxRTT,omitempty"`
+	// acceptable failure rate. default 0.2
+	Tolerance float64 `json:"tolerance,omitempty"`
+	// minimum burst samples before a challenger can replace a healthy winner. default 4
+	MinSamples int32 `json:"minSamples,omitempty"`
+	// quarantine duration after runtime or observed failures. default 30s
+	HoldDown duration.Duration `json:"holdDown,omitempty"`
+	// successful observation cycles required after hold-down before re-entry. default 2
+	RecoveryObservations int32 `json:"recoveryObservations,omitempty"`
 }
 
 // healthCheckSettings holds settings for health Checker
@@ -109,6 +127,36 @@ func (v *strategyLeastLoadConfig) Build() (proto.Message, error) {
 			continue
 		}
 		config.Baselines = append(config.Baselines, int64(b))
+	}
+	return config, nil
+}
+
+// Build implements Buildable.
+func (v *strategyMostStableConfig) Build() (proto.Message, error) {
+	config := &router.StrategyMostStableConfig{}
+	config.Costs = v.Costs
+	config.MaxRTT = int64(v.MaxRTT)
+	if config.MaxRTT < 0 {
+		config.MaxRTT = 0
+	}
+	config.Tolerance = float32(v.Tolerance)
+	if config.Tolerance <= 0 {
+		config.Tolerance = 0.2
+	}
+	if config.Tolerance > 1 {
+		config.Tolerance = 1
+	}
+	config.MinSamples = v.MinSamples
+	if config.MinSamples <= 0 {
+		config.MinSamples = 4
+	}
+	config.HoldDown = int64(v.HoldDown)
+	if config.HoldDown <= 0 {
+		config.HoldDown = int64(30 * time.Second)
+	}
+	config.RecoveryObservations = v.RecoveryObservations
+	if config.RecoveryObservations <= 0 {
+		config.RecoveryObservations = 2
 	}
 	return config, nil
 }

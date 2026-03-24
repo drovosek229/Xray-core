@@ -47,6 +47,10 @@ message OutboundStatus{
   int64 last_try_time = 6;
 
   HealthPingMeasurementResult health_ping = 7;
+  /* @Document The last runtime failure time for this outbound.
+     @Type time.ms
+  */
+  int64 last_failure_time = 8;
 }
 
 message ProbeResult{

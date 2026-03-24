@@ -23,10 +23,11 @@ type Observer struct {
 	config *Config
 	ctx    context.Context
 
-	statusLock sync.RWMutex
-	status     []*observatory.OutboundStatus
-	failures   map[string]liveFailure
-	hp         *HealthPing
+	statusLock       sync.RWMutex
+	status           []*observatory.OutboundStatus
+	failures         map[string]liveFailure
+	lastFailureTimes map[string]int64
+	hp               *HealthPing
 
 	reprobeLock    sync.Mutex
 	pendingReprobe map[string]struct{}
@@ -41,6 +42,7 @@ type Observer struct {
 type liveFailure struct {
 	lastErrorReason string
 	lastTryTime     int64
+	lastFailureTime int64
 }
 
 func (o *Observer) GetObservation(ctx context.Context) (proto.Message, error) {
@@ -54,6 +56,9 @@ func (o *Observer) GetObservation(ctx context.Context) (proto.Message, error) {
 
 func (o *Observer) createResult() []*observatory.OutboundStatus {
 	var result []*observatory.OutboundStatus
+	o.statusLock.RLock()
+	lastFailureTimes := cloneFailureTimes(o.lastFailureTimes)
+	o.statusLock.RUnlock()
 	o.hp.access.Lock()
 	defer o.hp.access.Unlock()
 	tags := make([]string, 0, len(o.hp.Results))
@@ -72,6 +77,7 @@ func (o *Observer) createResult() []*observatory.OutboundStatus {
 			OutboundTag:     name,
 			LastSeenTime:    unixOrZero(lastSeenTime),
 			LastTryTime:     unixOrZero(lastTryTime),
+			LastFailureTime: lastFailureTimes[name],
 			HealthPing: &observatory.HealthPingMeasurementResult{
 				All:       int64(stats.All),
 				Fail:      int64(stats.Fail),
@@ -154,9 +160,15 @@ func (o *Observer) setLiveFailure(outboundTag, reason string) {
 	if o.failures == nil {
 		o.failures = make(map[string]liveFailure)
 	}
+	if o.lastFailureTimes == nil {
+		o.lastFailureTimes = make(map[string]int64)
+	}
+	failedAt := time.Now().UnixMilli()
+	o.lastFailureTimes[outboundTag] = failedAt
 	o.failures[outboundTag] = liveFailure{
 		lastErrorReason: reason,
 		lastTryTime:     time.Now().Unix(),
+		lastFailureTime: failedAt,
 	}
 }
 
@@ -288,6 +300,17 @@ func cloneLiveFailures(failures map[string]liveFailure) map[string]liveFailure {
 	return clones
 }
 
+func cloneFailureTimes(failureTimes map[string]int64) map[string]int64 {
+	if len(failureTimes) == 0 {
+		return nil
+	}
+	clones := make(map[string]int64, len(failureTimes))
+	for tag, failedAt := range failureTimes {
+		clones[tag] = failedAt
+	}
+	return clones
+}
+
 func applyLiveFailures(statuses []*observatory.OutboundStatus, failures map[string]liveFailure) []*observatory.OutboundStatus {
 	if len(failures) == 0 {
 		return statuses
@@ -307,6 +330,7 @@ func applyLiveFailures(statuses []*observatory.OutboundStatus, failures map[stri
 			statuses[idx].Delay = rttFailed.Milliseconds()
 			statuses[idx].LastErrorReason = failure.lastErrorReason
 			statuses[idx].LastTryTime = failure.lastTryTime
+			statuses[idx].LastFailureTime = failure.lastFailureTime
 			continue
 		}
 
@@ -316,6 +340,7 @@ func applyLiveFailures(statuses []*observatory.OutboundStatus, failures map[stri
 			LastErrorReason: failure.lastErrorReason,
 			OutboundTag:     tag,
 			LastTryTime:     failure.lastTryTime,
+			LastFailureTime: failure.lastFailureTime,
 		})
 	}
 
