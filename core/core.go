@@ -11,6 +11,7 @@ package core
 
 import (
 	"fmt"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 
@@ -39,22 +40,35 @@ var (
 	intro       = "A fork-owned Xray core for the internet client."
 )
 
+var semverTagPattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
+
 func init() {
-	// Manually injected
-	if build != "Custom" {
-		return
-	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
 		return
 	}
+	detectedBuild, detectedReleaseTag := buildMetadataFromInfo(info)
+	if build == "Custom" && detectedBuild != "" {
+		build = detectedBuild
+	}
+	if releaseTag == "" && detectedReleaseTag != "" {
+		releaseTag = detectedReleaseTag
+	}
+}
+
+func buildMetadataFromInfo(info *debug.BuildInfo) (string, string) {
+	if info == nil {
+		return "", ""
+	}
+
 	var isDirty bool
 	var foundBuild bool
+	var build string
 	for _, setting := range info.Settings {
 		switch setting.Key {
 		case "vcs.revision":
 			if len(setting.Value) < 7 {
-				return
+				return "", releaseTagFromVersion(info.Main.Version)
 			}
 			build = setting.Value[:7]
 			foundBuild = true
@@ -65,6 +79,15 @@ func init() {
 	if isDirty && foundBuild {
 		build += "-dirty"
 	}
+
+	return build, releaseTagFromVersion(info.Main.Version)
+}
+
+func releaseTagFromVersion(version string) string {
+	if !semverTagPattern.MatchString(version) {
+		return ""
+	}
+	return version
 }
 
 // ProductName returns the product name for this fork's user-visible versioning.

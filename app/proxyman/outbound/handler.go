@@ -202,7 +202,7 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 
 	err, errC := h.dispatchOnce(ctx, attemptLink)
 	if err != nil {
-		failureClassification := h.classifyBalancerFailure(ctx, err, countedReader.BytesRead(), countedWriter.BytesWritten())
+		failureClassification := h.classifyBalancerFailure(ctx, err, countedReader.BytesRead(), countedWriter)
 		if errC != nil && (goerrors.Is(errC, io.EOF) || goerrors.Is(errC, io.ErrClosedPipe) || goerrors.Is(errC, context.Canceled)) &&
 			!failureClassification.shouldTreatBenignErrorAsFailure() {
 			if goerrors.Is(errC, io.ErrClosedPipe) {

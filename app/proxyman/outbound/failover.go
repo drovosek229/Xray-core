@@ -21,6 +21,7 @@ type balancerFailureClassification int
 
 const (
 	balancerFailureClassificationNone balancerFailureClassification = iota
+	balancerFailureClassificationResponseStarted
 	balancerFailureClassificationZeroByteReplay
 	balancerFailureClassificationRequestConsumed
 	balancerFailureClassificationLegacyConsumedReplay
@@ -204,8 +205,11 @@ func (r *replayingReader) nextRecorded() (buf.MultiBuffer, bool) {
 }
 
 type countingWriter struct {
-	writer       buf.Writer
-	bytesWritten int64
+	writer         buf.Writer
+	bytesWritten   int64
+	writeSucceeded bool
+	writeFailed    bool
+	lastWriteError error
 }
 
 func newCountingWriter(writer buf.Writer) *countingWriter {
@@ -213,8 +217,19 @@ func newCountingWriter(writer buf.Writer) *countingWriter {
 }
 
 func (w *countingWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
-	w.bytesWritten += int64(mb.Len())
-	return w.writer.WriteMultiBuffer(mb)
+	nonEmpty := !mb.IsEmpty()
+	size := int64(mb.Len())
+	err := w.writer.WriteMultiBuffer(mb)
+	if err != nil {
+		w.writeFailed = true
+		w.lastWriteError = err
+		return err
+	}
+	if nonEmpty {
+		w.writeSucceeded = true
+		w.bytesWritten += size
+	}
+	return nil
 }
 
 func (w *countingWriter) Interrupt() {
@@ -227,6 +242,18 @@ func (w *countingWriter) Close() error {
 
 func (w *countingWriter) BytesWritten() int64 {
 	return w.bytesWritten
+}
+
+func (w *countingWriter) ResponseStarted() bool {
+	return w.writeSucceeded && w.bytesWritten > 0
+}
+
+func (w *countingWriter) WriteFailed() bool {
+	return w.writeFailed
+}
+
+func (w *countingWriter) LastWriteError() error {
+	return w.lastWriteError
 }
 
 func (c balancerFailureClassification) shouldTreatBenignErrorAsFailure() bool {
@@ -244,14 +271,20 @@ func (h *Handler) retryReplayPolicy() proxyman.RetryReplayPolicy {
 	return h.senderSettings.GetRetryReplayPolicy()
 }
 
-func (h *Handler) classifyBalancerFailure(ctx context.Context, err error, requestBytesRead, responseBytesWritten int64) balancerFailureClassification {
-	if ctx.Err() != nil || responseBytesWritten != 0 {
+func (h *Handler) classifyBalancerFailure(ctx context.Context, err error, requestBytesRead int64, writer *countingWriter) balancerFailureClassification {
+	if ctx.Err() != nil {
 		return balancerFailureClassificationNone
 	}
 
 	snapshot, ok := session.GetBalancerRetrySnapshot(ctx)
 	if !ok || snapshot.SelectedOutboundTag == "" {
 		return balancerFailureClassificationNone
+	}
+	if writer != nil && writer.WriteFailed() {
+		return balancerFailureClassificationNone
+	}
+	if writer != nil && writer.ResponseStarted() {
+		return balancerFailureClassificationResponseStarted
 	}
 
 	if requestBytesRead == 0 {
@@ -287,6 +320,9 @@ func (h *Handler) handleBalancerFailure(ctx context.Context, writer buf.Writer, 
 
 	if snapshot.RetryOwnerTag == h.tag && classification == balancerFailureClassificationRequestConsumed {
 		errors.LogInfo(ctx, "replay denied for outbound [", snapshot.SelectedOutboundTag, "]: request was already consumed")
+	}
+	if snapshot.RetryOwnerTag == h.tag && classification == balancerFailureClassificationResponseStarted {
+		errors.LogInfo(ctx, "replay denied for outbound [", snapshot.SelectedOutboundTag, "]: response had already started")
 	}
 
 	if snapshot.Retried || snapshot.RetryOwnerTag != h.tag || requestReader == nil || !requestReader.CanReplay() || !classification.allowsReplay() {

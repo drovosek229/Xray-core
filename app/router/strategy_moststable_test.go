@@ -90,6 +90,50 @@ func TestMostStableRuntimeFailureStartsHoldDownUntilRecoveryCycle(t *testing.T) 
 	}
 }
 
+func TestMostStableDoesNotRestartHoldDownForSameRuntimeFailureEpisode(t *testing.T) {
+	failedAt := time.Now().UnixMilli()
+	strategy := newTestMostStableStrategyWithConfig(&sequenceObservatory{
+		results: []proto.Message{
+			mostStableResult(
+				mostStableStatus("node-a", true, 50, 10, 0, 10, 0, 40*time.Millisecond, 10*time.Millisecond),
+				mostStableStatus("node-b", true, 70, 10, 0, 10, 0, 60*time.Millisecond, 10*time.Millisecond),
+			),
+			mostStableResult(
+				mostStableStatus("node-a", false, 99999999, 11, failedAt, 0, 0, 0, 0),
+				mostStableStatus("node-b", true, 70, 11, 0, 10, 0, 60*time.Millisecond, 10*time.Millisecond),
+			),
+			mostStableResult(
+				mostStableStatus("node-a", false, 99999999, 12, failedAt, 0, 0, 0, 0),
+				mostStableStatus("node-b", true, 70, 12, 0, 10, 0, 60*time.Millisecond, 10*time.Millisecond),
+			),
+			mostStableResult(
+				mostStableStatus("node-a", true, 50, 13, failedAt, 10, 0, 40*time.Millisecond, 10*time.Millisecond),
+				mostStableStatus("node-b", true, 70, 13, 0, 10, 0, 60*time.Millisecond, 10*time.Millisecond),
+			),
+		},
+	}, &StrategyMostStableConfig{
+		Tolerance:            0.2,
+		MinSamples:           1,
+		HoldDown:             int64(60 * time.Millisecond),
+		RecoveryObservations: 1,
+	})
+
+	if got := strategy.PickOutbound([]string{"node-a", "node-b"}); got != "node-a" {
+		t.Fatalf("expected initial winner node-a, got %q", got)
+	}
+	if got := strategy.PickOutbound([]string{"node-a", "node-b"}); got != "node-b" {
+		t.Fatalf("expected runtime failure to switch to node-b, got %q", got)
+	}
+
+	time.Sleep(70 * time.Millisecond)
+	if got := strategy.PickOutbound([]string{"node-a", "node-b"}); got != "node-b" {
+		t.Fatalf("expected repeated dead sample from same episode to keep node-a unavailable, got %q", got)
+	}
+	if got := strategy.PickOutbound([]string{"node-a", "node-b"}); got != "node-a" {
+		t.Fatalf("expected node-a to recover without a restarted hold-down, got %q", got)
+	}
+}
+
 func TestMostStableMaxRTTBreachRequiresRecoveryObservations(t *testing.T) {
 	strategy := newTestMostStableStrategyWithConfig(&sequenceObservatory{
 		results: []proto.Message{

@@ -358,6 +358,9 @@ func (h *mostStableHistory) update(candidate *mostStableCandidate, holdDown time
 
 	h.lastTryTime = candidate.lastTryTime
 	if candidate.failedObservation() {
+		if candidate.lastFailureTime > 0 {
+			return
+		}
 		h.startHoldDown(time.Unix(candidate.lastTryTime, 0), holdDown)
 		return
 	}

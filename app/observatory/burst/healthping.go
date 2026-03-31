@@ -86,7 +86,7 @@ func NewHealthPing(ctx context.Context, dispatcher routing.Dispatcher, config *H
 }
 
 // StartScheduler implements the HealthChecker
-func (h *HealthPing) StartScheduler(selector func() ([]string, error), afterBatch func()) {
+func (h *HealthPing) StartScheduler(selector func() ([]string, error), afterBatch func([]string)) {
 	if h.ticker != nil {
 		return
 	}
@@ -225,7 +225,7 @@ func (h *HealthPing) sampleDelays(duration time.Duration, rounds int) []time.Dur
 	return delays
 }
 
-func (h *HealthPing) runInitialBatch(selector func() ([]string, error), afterBatch func()) {
+func (h *HealthPing) runInitialBatch(selector func() ([]string, error), afterBatch func([]string)) {
 	tags, err := selector()
 	if err != nil {
 		errors.LogWarning(h.ctx, "error select outbounds for initial health check: ", err)
@@ -234,11 +234,11 @@ func (h *HealthPing) runInitialBatch(selector func() ([]string, error), afterBat
 	_ = h.Check(tags)
 	h.Cleanup(tags)
 	if afterBatch != nil {
-		afterBatch()
+		afterBatch(tags)
 	}
 }
 
-func (h *HealthPing) runScheduledBatch(selector func() ([]string, error), duration time.Duration, afterBatch func()) {
+func (h *HealthPing) runScheduledBatch(selector func() ([]string, error), duration time.Duration, afterBatch func([]string)) {
 	tags, err := selector()
 	if err != nil {
 		errors.LogWarning(h.ctx, "error select outbounds for scheduled health check: ", err)
@@ -247,7 +247,7 @@ func (h *HealthPing) runScheduledBatch(selector func() ([]string, error), durati
 	h.runCheck(tags, duration, h.Settings.SamplingCount)
 	h.Cleanup(tags)
 	if afterBatch != nil {
-		afterBatch()
+		afterBatch(tags)
 	}
 }
 

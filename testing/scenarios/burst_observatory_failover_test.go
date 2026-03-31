@@ -3,6 +3,8 @@ package scenarios
 import (
 	"context"
 	"fmt"
+	"io"
+	stdnet "net"
 	"net/http"
 	"testing"
 	"time"
@@ -251,6 +253,210 @@ func TestBurstObservatoryDialerProxyFailover(t *testing.T) {
 	})
 }
 
+func TestBurstObservatoryRouteNextRequestFailsOverAfterResponseStartedFailure(t *testing.T) {
+	const runtimeFailureBackoff = 1500 * time.Millisecond
+
+	probePort := tcp.PickPort()
+	probeServer := &v2httptest.Server{
+		Port: probePort,
+		PathHandler: map[string]http.HandlerFunc{
+			"/probe": func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			},
+		},
+	}
+	_, err := probeServer.Start()
+	common.Must(err)
+	defer probeServer.Close()
+
+	echoServer := tcp.Server{MsgProcessor: xor}
+	echoDest, err := echoServer.Start()
+	common.Must(err)
+	defer echoServer.Close()
+
+	partialDest, closePartial := startBurstResponseStartedFailureServer(t)
+	defer closePartial()
+
+	requestedPort := tcp.PickPort()
+	serverUserID := protocol.NewID(uuid.New())
+
+	serverAPort := tcp.PickPort()
+	serverBPort := tcp.PickPort()
+	serverA := newBurstProxyServerConfig(serverAPort, serverUserID, requestedPort, &partialDest)
+	serverB := newBurstProxyServerConfig(serverBPort, serverUserID, requestedPort, &echoDest)
+
+	clientPort := tcp.PickPort()
+	cmdPort := tcp.PickPort()
+	client := &core.Config{
+		App: []*serial.TypedMessage{
+			serial.ToTypedMessage(newObservatoryCommanderConfig(cmdPort)),
+			serial.ToTypedMessage(&router.Config{
+				BalancingRule: []*router.BalancingRule{
+					{
+						Tag:              "route-balancer",
+						OutboundSelector: []string{"outer-"},
+						Strategy:         "roundrobin",
+					},
+				},
+				Rule: []*router.RoutingRule{
+					{
+						InboundTag: []string{"in"},
+						TargetTag: &router.RoutingRule_BalancingTag{
+							BalancingTag: "route-balancer",
+						},
+					},
+				},
+			}),
+			serial.ToTypedMessage(newBurstObservatoryConfig("outer-", probePort, runtimeFailureBackoff)),
+		},
+		Inbound: []*core.InboundHandlerConfig{
+			{
+				Tag: "in",
+				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
+					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(clientPort)}},
+					Listen:   net.NewIPOrDomain(net.LocalHostIP),
+				}),
+				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
+					Address:  net.NewIPOrDomain(net.LocalHostIP),
+					Port:     uint32(requestedPort),
+					Networks: []net.Network{net.Network_TCP},
+				}),
+			},
+		},
+		Outbound: []*core.OutboundHandlerConfig{
+			newVMessOutbound("outer-a", serverAPort, serverUserID),
+			newVMessOutbound("outer-b", serverBPort, serverUserID),
+		},
+	}
+
+	servers, err := InitializeServerConfigs(serverA, serverB, client)
+	common.Must(err)
+	defer CloseAllServers(servers)
+
+	cmdConn, statusClient := mustConnectObservatoryClient(t, cmdPort)
+	defer cmdConn.Close()
+
+	waitForObservedAlive(t, statusClient, map[string]bool{
+		"outer-a": true,
+		"outer-b": true,
+	})
+
+	if err := testTCPConn(clientPort, 1024, 5*time.Second)(); err == nil {
+		t.Fatal("expected first request to fail after response bytes were written")
+	}
+
+	waitForObservedAlive(t, statusClient, map[string]bool{
+		"outer-a": false,
+		"outer-b": true,
+	})
+
+	if err := testTCPConn(clientPort, 1024, 5*time.Second)(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBurstObservatoryDialerProxyNextRequestFailsOverAfterResponseStartedFailure(t *testing.T) {
+	const runtimeFailureBackoff = 1500 * time.Millisecond
+
+	probePort := tcp.PickPort()
+	probeServer := &v2httptest.Server{
+		Port: probePort,
+		PathHandler: map[string]http.HandlerFunc{
+			"/probe": func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			},
+		},
+	}
+	_, err := probeServer.Start()
+	common.Must(err)
+	defer probeServer.Close()
+
+	echoServer := tcp.Server{MsgProcessor: xor}
+	echoDest, err := echoServer.Start()
+	common.Must(err)
+	defer echoServer.Close()
+
+	partialDest, closePartial := startBurstResponseStartedFailureServer(t)
+	defer closePartial()
+
+	requestedPort := tcp.PickPort()
+	serverUserID := protocol.NewID(uuid.New())
+
+	serverAPort := tcp.PickPort()
+	serverBPort := tcp.PickPort()
+	serverA := newBurstProxyServerConfig(serverAPort, serverUserID, requestedPort, &partialDest)
+	serverB := newBurstProxyServerConfig(serverBPort, serverUserID, requestedPort, &echoDest)
+
+	clientPort := tcp.PickPort()
+	cmdPort := tcp.PickPort()
+	client := &core.Config{
+		App: []*serial.TypedMessage{
+			serial.ToTypedMessage(newObservatoryCommanderConfig(cmdPort)),
+			serial.ToTypedMessage(&router.Config{
+				BalancingRule: []*router.BalancingRule{
+					{
+						Tag:              "proxy-balancer",
+						OutboundSelector: []string{"proxy-"},
+						Strategy:         "roundrobin",
+					},
+				},
+			}),
+			serial.ToTypedMessage(newBurstObservatoryConfig("proxy-", probePort, runtimeFailureBackoff)),
+		},
+		Inbound: []*core.InboundHandlerConfig{
+			{
+				Tag: "in",
+				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
+					PortList: &net.PortList{Range: []*net.PortRange{net.SinglePortRange(clientPort)}},
+					Listen:   net.NewIPOrDomain(net.LocalHostIP),
+				}),
+				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
+					Address:  net.NewIPOrDomain(net.LocalHostIP),
+					Port:     uint32(requestedPort),
+					Networks: []net.Network{net.Network_TCP},
+				}),
+			},
+		},
+		Outbound: []*core.OutboundHandlerConfig{
+			{
+				Tag:           "outer",
+				ProxySettings: serial.ToTypedMessage(&freedom.Config{}),
+				SenderSettings: serial.ToTypedMessage(&proxyman.SenderConfig{
+					ProxySettings:     &internet.ProxyConfig{Tag: "proxy-balancer"},
+					RetryReplayPolicy: proxyman.RetryReplayPolicy_LEGACY_CONSUMED_BENIGN,
+				}),
+			},
+			newVMessOutbound("proxy-a", serverAPort, serverUserID),
+			newVMessOutbound("proxy-b", serverBPort, serverUserID),
+		},
+	}
+
+	servers, err := InitializeServerConfigs(serverA, serverB, client)
+	common.Must(err)
+	defer CloseAllServers(servers)
+
+	cmdConn, statusClient := mustConnectObservatoryClient(t, cmdPort)
+	defer cmdConn.Close()
+
+	waitForObservedAlive(t, statusClient, map[string]bool{
+		"proxy-a": true,
+		"proxy-b": true,
+	})
+
+	if err := testTCPConn(clientPort, 1024, 5*time.Second)(); err == nil {
+		t.Fatal("expected first request to fail after response bytes were written")
+	}
+
+	waitForObservedAlive(t, statusClient, map[string]bool{
+		"proxy-a": false,
+		"proxy-b": true,
+	})
+
+	if err := testTCPConn(clientPort, 1024, 5*time.Second)(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newBurstProxyServerConfig(listenPort net.Port, userID *protocol.ID, requestedPort net.Port, override *net.Destination) *core.Config {
 	config := &core.Config{
 		Inbound: []*core.InboundHandlerConfig{
@@ -351,6 +557,45 @@ func newBurstObservatoryConfig(selector string, probePort net.Port, runtimeFailu
 			HttpMethod:    http.MethodGet,
 		},
 		RuntimeFailure: runtimeFailure,
+	}
+}
+
+func startBurstResponseStartedFailureServer(t *testing.T) (net.Destination, func()) {
+	t.Helper()
+
+	listener, err := stdnet.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn stdnet.Conn) {
+				defer conn.Close()
+
+				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+				var firstByte [1]byte
+				_, _ = io.ReadFull(conn, firstByte[:])
+				_, _ = conn.Write([]byte("!"))
+				if tcpConn, ok := conn.(*stdnet.TCPConn); ok {
+					_ = tcpConn.SetLinger(0)
+				}
+			}(conn)
+		}
+	}()
+
+	tcpAddr, ok := listener.Addr().(*stdnet.TCPAddr)
+	if !ok {
+		_ = listener.Close()
+		t.Fatal("unexpected listener type")
+	}
+
+	return net.TCPDestination(net.IPAddress(tcpAddr.IP), net.Port(tcpAddr.Port)), func() {
+		_ = listener.Close()
 	}
 }
 

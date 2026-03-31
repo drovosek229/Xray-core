@@ -175,6 +175,15 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/XTLS/Xray-core)
 
+## Fork Release Tags
+
+This fork is consumed as a Go module, so release tags must be valid Go semver tags with a leading `v`.
+
+- Stable fork releases use `v1.YYMMDD.PATCH`, for example `v1.260401.0`.
+- Go tooling ignores non-semver tags such as `25.03.26`, which forces downstream consumers onto pseudo-versions.
+- Use `scripts/tag-release.sh` to create annotated release tags, then push them with `git push origin refs/tags/<tag>`.
+- When built from a semver tag, the binary now reports that release tag automatically in `version` output.
+
 ## Credits
 
 - [Xray-core v1.0.0](https://github.com/XTLS/Xray-core/releases/tag/v1.0.0) was forked from [v2fly-core 9a03cc5](https://github.com/v2fly/v2ray-core/commit/9a03cc5c98d04cc28320fcee26dbc236b3291256), and we have made & accumulated a huge number of enhancements over time, check [the release notes for each version](https://github.com/XTLS/Xray-core/releases).

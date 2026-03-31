@@ -92,6 +92,23 @@ func (f *retryTestObservatoryFeedback) RecordOutboundFailure(ctx context.Context
 	f.tags = append(f.tags, outboundTag)
 }
 
+type retryTestFailAfterWriteWriter struct {
+	writes    int
+	failAfter int
+}
+
+func (w *retryTestFailAfterWriteWriter) WriteMultiBuffer(buf.MultiBuffer) error {
+	w.writes++
+	if w.writes > w.failAfter {
+		return io.ErrClosedPipe
+	}
+	return nil
+}
+
+func (*retryTestFailAfterWriteWriter) Interrupt() {}
+
+func (*retryTestFailAfterWriteWriter) Close() error { return nil }
+
 func newRetryTestContext() context.Context {
 	ctx := context.Background()
 	ctx = session.ContextWithOutbounds(ctx, []*session.Outbound{{
@@ -194,6 +211,7 @@ func TestHandlerDoesNotRetryAfterRequestBytesAreConsumed(t *testing.T) {
 			"balancer": {"proxy-a", "proxy-b"},
 		},
 	}
+	feedback := &retryTestObservatoryFeedback{}
 
 	proxyA := &retryTestProxy{process: func(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
 		if _, err := link.Reader.ReadMultiBuffer(); err != nil {
@@ -206,16 +224,18 @@ func TestHandlerDoesNotRetryAfterRequestBytesAreConsumed(t *testing.T) {
 	}}
 
 	handlerA := &Handler{
-		tag:                "proxy-a",
-		proxy:              proxyA,
-		outboundManager:    manager,
-		balancerSelectorEx: selector,
+		tag:                 "proxy-a",
+		proxy:               proxyA,
+		outboundManager:     manager,
+		balancerSelectorEx:  selector,
+		observatoryFeedback: feedback,
 	}
 	handlerB := &Handler{
-		tag:                "proxy-b",
-		proxy:              proxyB,
-		outboundManager:    manager,
-		balancerSelectorEx: selector,
+		tag:                 "proxy-b",
+		proxy:               proxyB,
+		outboundManager:     manager,
+		balancerSelectorEx:  selector,
+		observatoryFeedback: feedback,
 	}
 	manager.handlers["proxy-a"] = handlerA
 	manager.handlers["proxy-b"] = handlerB
@@ -233,6 +253,9 @@ func TestHandlerDoesNotRetryAfterRequestBytesAreConsumed(t *testing.T) {
 	if proxyB.calls != 0 {
 		t.Fatalf("expected no retry after request bytes were consumed, got %d retries", proxyB.calls)
 	}
+	if len(feedback.tags) != 1 || feedback.tags[0] != "proxy-a" {
+		t.Fatalf("expected consumed request failure to be reported, got %v", feedback.tags)
+	}
 }
 
 func TestHandlerDoesNotRetryAfterResponseBytesAreWritten(t *testing.T) {
@@ -242,6 +265,7 @@ func TestHandlerDoesNotRetryAfterResponseBytesAreWritten(t *testing.T) {
 			"balancer": {"proxy-a", "proxy-b"},
 		},
 	}
+	feedback := &retryTestObservatoryFeedback{}
 
 	proxyA := &retryTestProxy{process: func(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
 		if err := link.Writer.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("x"))}); err != nil {
@@ -254,16 +278,18 @@ func TestHandlerDoesNotRetryAfterResponseBytesAreWritten(t *testing.T) {
 	}}
 
 	handlerA := &Handler{
-		tag:                "proxy-a",
-		proxy:              proxyA,
-		outboundManager:    manager,
-		balancerSelectorEx: selector,
+		tag:                 "proxy-a",
+		proxy:               proxyA,
+		outboundManager:     manager,
+		balancerSelectorEx:  selector,
+		observatoryFeedback: feedback,
 	}
 	handlerB := &Handler{
-		tag:                "proxy-b",
-		proxy:              proxyB,
-		outboundManager:    manager,
-		balancerSelectorEx: selector,
+		tag:                 "proxy-b",
+		proxy:               proxyB,
+		outboundManager:     manager,
+		balancerSelectorEx:  selector,
+		observatoryFeedback: feedback,
 	}
 	manager.handlers["proxy-a"] = handlerA
 	manager.handlers["proxy-b"] = handlerB
@@ -280,6 +306,63 @@ func TestHandlerDoesNotRetryAfterResponseBytesAreWritten(t *testing.T) {
 
 	if proxyB.calls != 0 {
 		t.Fatalf("expected no retry after response bytes were written, got %d retries", proxyB.calls)
+	}
+	if len(feedback.tags) != 1 || feedback.tags[0] != "proxy-a" {
+		t.Fatalf("expected response-started failure to be reported, got %v", feedback.tags)
+	}
+}
+
+func TestHandlerDoesNotReportProxyFailureWhenDownstreamWriterFailsAfterResponseStarts(t *testing.T) {
+	manager := &retryTestOutboundManager{handlers: map[string]feature_outbound.Handler{}}
+	selector := &retryTestBalancerSelector{
+		choices: map[string][]string{
+			"balancer": {"proxy-a", "proxy-b"},
+		},
+	}
+	feedback := &retryTestObservatoryFeedback{}
+
+	proxyA := &retryTestProxy{process: func(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
+		if err := link.Writer.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("x"))}); err != nil {
+			return err
+		}
+		return link.Writer.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("y"))})
+	}}
+	proxyB := &retryTestProxy{process: func(context.Context, *transport.Link, internet.Dialer) error {
+		return nil
+	}}
+
+	handlerA := &Handler{
+		tag:                 "proxy-a",
+		proxy:               proxyA,
+		outboundManager:     manager,
+		balancerSelectorEx:  selector,
+		observatoryFeedback: feedback,
+	}
+	handlerB := &Handler{
+		tag:                 "proxy-b",
+		proxy:               proxyB,
+		outboundManager:     manager,
+		balancerSelectorEx:  selector,
+		observatoryFeedback: feedback,
+	}
+	manager.handlers["proxy-a"] = handlerA
+	manager.handlers["proxy-b"] = handlerB
+
+	ctx := newRetryTestContext()
+	ctx = session.SetBalancerSelection(ctx, session.BalancerSelectionKindRoute, "balancer", "proxy-a", "proxy-a")
+
+	link := &transport.Link{
+		Reader: buf.NewReader(bytes.NewReader(nil)),
+		Writer: &retryTestFailAfterWriteWriter{failAfter: 1},
+	}
+
+	handlerA.Dispatch(ctx, link)
+
+	if proxyB.calls != 0 {
+		t.Fatalf("expected no retry when downstream writer fails, got %d retries", proxyB.calls)
+	}
+	if len(feedback.tags) != 0 {
+		t.Fatalf("expected no proxy failure report for downstream writer failure, got %v", feedback.tags)
 	}
 }
 
@@ -813,6 +896,7 @@ func TestHandlerDoesNotRetryDialerProxyBalancerAfterConsumedRequestByDefault(t *
 			"proxy-balancer": {"proxy-a", "proxy-b"},
 		},
 	}
+	feedback := &retryTestObservatoryFeedback{}
 
 	innerA := &retryTestProxy{process: func(context.Context, *transport.Link, internet.Dialer) error {
 		return nil
@@ -836,12 +920,13 @@ func TestHandlerDoesNotRetryDialerProxyBalancerAfterConsumedRequestByDefault(t *
 	manager.handlers["proxy-a"] = &Handler{tag: "proxy-a", proxy: innerA, outboundManager: manager}
 	manager.handlers["proxy-b"] = &Handler{tag: "proxy-b", proxy: innerB, outboundManager: manager}
 	outerHandler := &Handler{
-		tag:                "outer",
-		proxy:              outer,
-		outboundManager:    manager,
-		balancerSelector:   selector,
-		balancerSelectorEx: selector,
-		senderSettings:     newRetryTestSenderConfig("proxy-balancer", proxyman.RetryReplayPolicy_ZERO_BYTE_ONLY),
+		tag:                 "outer",
+		proxy:               outer,
+		outboundManager:     manager,
+		observatoryFeedback: feedback,
+		balancerSelector:    selector,
+		balancerSelectorEx:  selector,
+		senderSettings:      newRetryTestSenderConfig("proxy-balancer", proxyman.RetryReplayPolicy_ZERO_BYTE_ONLY),
 	}
 	manager.handlers["outer"] = outerHandler
 
@@ -865,6 +950,129 @@ func TestHandlerDoesNotRetryDialerProxyBalancerAfterConsumedRequestByDefault(t *
 	}
 	if len(selector.excludingCalls[0]) != 0 {
 		t.Fatalf("expected first balancer selection to have no exclusions, got %v", selector.excludingCalls[0])
+	}
+	if len(feedback.tags) != 1 || feedback.tags[0] != "proxy-a" {
+		t.Fatalf("expected consumed dialer proxy failure to be reported, got %v", feedback.tags)
+	}
+}
+
+func TestHandlerDoesNotRetryDialerProxyBalancerAfterResponseBytesAreWrittenButReportsFailure(t *testing.T) {
+	manager := &retryTestOutboundManager{handlers: map[string]feature_outbound.Handler{}}
+	selector := &retryTestBalancerSelector{
+		choices: map[string][]string{
+			"proxy-balancer": {"proxy-a", "proxy-b"},
+		},
+	}
+	feedback := &retryTestObservatoryFeedback{}
+
+	innerA := &retryTestProxy{process: func(context.Context, *transport.Link, internet.Dialer) error {
+		return nil
+	}}
+	innerB := &retryTestProxy{process: func(context.Context, *transport.Link, internet.Dialer) error {
+		return nil
+	}}
+
+	outer := &retryTestProxy{process: func(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
+		conn, err := dialer.Dial(ctx, net.TCPDestination(net.DomainAddress("example.com"), 80))
+		if err != nil {
+			return err
+		}
+		conn.Close()
+		if err := link.Writer.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("x"))}); err != nil {
+			return err
+		}
+		return io.ErrClosedPipe
+	}}
+
+	manager.handlers["proxy-a"] = &Handler{tag: "proxy-a", proxy: innerA, outboundManager: manager}
+	manager.handlers["proxy-b"] = &Handler{tag: "proxy-b", proxy: innerB, outboundManager: manager}
+	outerHandler := &Handler{
+		tag:                 "outer",
+		proxy:               outer,
+		outboundManager:     manager,
+		observatoryFeedback: feedback,
+		balancerSelector:    selector,
+		balancerSelectorEx:  selector,
+		senderSettings:      newRetryTestSenderConfig("proxy-balancer", proxyman.RetryReplayPolicy_ZERO_BYTE_ONLY),
+	}
+	manager.handlers["outer"] = outerHandler
+
+	ctx := newRetryTestContext()
+	link := &transport.Link{
+		Reader: buf.NewReader(bytes.NewReader(nil)),
+		Writer: buf.NewWriter(&bytes.Buffer{}),
+	}
+
+	outerHandler.Dispatch(ctx, link)
+
+	if outer.calls != 1 {
+		t.Fatalf("expected outer outbound to run once, got %d", outer.calls)
+	}
+	if len(selector.excludingCalls) != 1 {
+		t.Fatalf("expected no retry after response started, got %d balancer calls", len(selector.excludingCalls))
+	}
+	if len(feedback.tags) != 1 || feedback.tags[0] != "proxy-a" {
+		t.Fatalf("expected response-started dialer proxy failure to be reported, got %v", feedback.tags)
+	}
+}
+
+func TestHandlerDoesNotReportDialerProxyFailureWhenDownstreamWriterFailsAfterResponseStarts(t *testing.T) {
+	manager := &retryTestOutboundManager{handlers: map[string]feature_outbound.Handler{}}
+	selector := &retryTestBalancerSelector{
+		choices: map[string][]string{
+			"proxy-balancer": {"proxy-a", "proxy-b"},
+		},
+	}
+	feedback := &retryTestObservatoryFeedback{}
+
+	innerA := &retryTestProxy{process: func(context.Context, *transport.Link, internet.Dialer) error {
+		return nil
+	}}
+	innerB := &retryTestProxy{process: func(context.Context, *transport.Link, internet.Dialer) error {
+		return nil
+	}}
+
+	outer := &retryTestProxy{process: func(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
+		conn, err := dialer.Dial(ctx, net.TCPDestination(net.DomainAddress("example.com"), 80))
+		if err != nil {
+			return err
+		}
+		conn.Close()
+		if err := link.Writer.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("x"))}); err != nil {
+			return err
+		}
+		return link.Writer.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("y"))})
+	}}
+
+	manager.handlers["proxy-a"] = &Handler{tag: "proxy-a", proxy: innerA, outboundManager: manager}
+	manager.handlers["proxy-b"] = &Handler{tag: "proxy-b", proxy: innerB, outboundManager: manager}
+	outerHandler := &Handler{
+		tag:                 "outer",
+		proxy:               outer,
+		outboundManager:     manager,
+		observatoryFeedback: feedback,
+		balancerSelector:    selector,
+		balancerSelectorEx:  selector,
+		senderSettings:      newRetryTestSenderConfig("proxy-balancer", proxyman.RetryReplayPolicy_ZERO_BYTE_ONLY),
+	}
+	manager.handlers["outer"] = outerHandler
+
+	ctx := newRetryTestContext()
+	link := &transport.Link{
+		Reader: buf.NewReader(bytes.NewReader(nil)),
+		Writer: &retryTestFailAfterWriteWriter{failAfter: 1},
+	}
+
+	outerHandler.Dispatch(ctx, link)
+
+	if outer.calls != 1 {
+		t.Fatalf("expected outer outbound to run once, got %d", outer.calls)
+	}
+	if len(selector.excludingCalls) != 1 {
+		t.Fatalf("expected no retry after downstream writer failure, got %d balancer calls", len(selector.excludingCalls))
+	}
+	if len(feedback.tags) != 0 {
+		t.Fatalf("expected no proxy failure report for downstream writer failure, got %v", feedback.tags)
 	}
 }
 

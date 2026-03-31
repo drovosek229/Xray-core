@@ -4,12 +4,14 @@ import (
 	"context"
 	stderrors "errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/xtls/xray-core/app/observatory"
 	"github.com/xtls/xray-core/common/signal/done"
+	feature_outbound "github.com/xtls/xray-core/features/outbound"
 )
 
 func TestLiveFailureOverlayMarksOutboundDeadImmediately(t *testing.T) {
@@ -287,23 +289,99 @@ func TestRuntimeFailureBackoffGrowsAndClamps(t *testing.T) {
 	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed once")
 	first := observer.failures["node-a"]
 	assertBackoffNear(t, time.Until(first.backoffUntil), 20*time.Millisecond)
-	if first.failureStreak != 1 {
-		t.Fatalf("expected first failure streak to be 1, got %d", first.failureStreak)
+	if streak := observer.runtimeFailureHistories["node-a"].failureStreak; streak != 1 {
+		t.Fatalf("expected first failure streak to be 1, got %d", streak)
 	}
 
 	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed twice")
 	second := observer.failures["node-a"]
 	assertBackoffNear(t, time.Until(second.backoffUntil), 40*time.Millisecond)
-	if second.failureStreak != 2 {
-		t.Fatalf("expected second failure streak to be 2, got %d", second.failureStreak)
+	if streak := observer.runtimeFailureHistories["node-a"].failureStreak; streak != 2 {
+		t.Fatalf("expected second failure streak to be 2, got %d", streak)
 	}
 
 	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed thrice")
 	third := observer.failures["node-a"]
 	assertBackoffNear(t, time.Until(third.backoffUntil), 50*time.Millisecond)
-	if third.failureStreak != 3 {
-		t.Fatalf("expected third failure streak to be 3, got %d", third.failureStreak)
+	if streak := observer.runtimeFailureHistories["node-a"].failureStreak; streak != 3 {
+		t.Fatalf("expected third failure streak to be 3, got %d", streak)
 	}
+}
+
+func TestRuntimeFailureHealthyProbeDoesNotRefreshFailureEpisode(t *testing.T) {
+	observer := &Observer{
+		hp: newTestHealthPing(),
+		runtimeFailure: &RuntimeFailureConfig{
+			BaseBackoff: int64(80 * time.Millisecond),
+			MaxBackoff:  int64(320 * time.Millisecond),
+		},
+	}
+	observer.finished = done.New()
+	_ = observer.finished.Close()
+	observer.setStatusSnapshot([]*observatory.OutboundStatus{{
+		Alive:       true,
+		Delay:       20,
+		OutboundTag: "node-a",
+	}})
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed")
+	failedTryTime := observer.failures["node-a"].lastTryTime
+
+	observer.hp.PutResult("node-a", 25*time.Millisecond)
+	observer.markLiveFailureHealthy("node-a", time.Now())
+	observer.refreshSnapshot()
+
+	if refreshedTryTime := observer.failures["node-a"].lastTryTime; refreshedTryTime != failedTryTime {
+		t.Fatalf("expected healthy reprobe to keep failure episode timestamp %d, got %d", failedTryTime, refreshedTryTime)
+	}
+}
+
+func TestRuntimeFailureBackoffDecaysAfterRecovery(t *testing.T) {
+	observer := &Observer{
+		hp: newTestHealthPing(),
+		runtimeFailure: &RuntimeFailureConfig{
+			BaseBackoff: int64(40 * time.Millisecond),
+			MaxBackoff:  int64(320 * time.Millisecond),
+		},
+	}
+	observer.finished = done.New()
+	_ = observer.finished.Close()
+	observer.setStatusSnapshot([]*observatory.OutboundStatus{{
+		Alive:       true,
+		Delay:       20,
+		OutboundTag: "node-a",
+	}})
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed once")
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed twice")
+	if streak := observer.runtimeFailureHistories["node-a"].failureStreak; streak != 2 {
+		t.Fatalf("expected pre-recovery streak 2, got %d", streak)
+	}
+
+	observer.hp.PutResult("node-a", 25*time.Millisecond)
+	observer.markLiveFailureHealthy("node-a", time.Now())
+	observer.statusLock.Lock()
+	failure := observer.failures["node-a"]
+	failure.backoffUntil = time.Now().Add(-time.Millisecond)
+	observer.failures["node-a"] = failure
+	observer.statusLock.Unlock()
+
+	response, err := observer.GetObservation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := response.(*observatory.ObservationResult).Status
+	if len(statuses) != 1 || !statuses[0].Alive {
+		t.Fatalf("expected node-a to recover before decay test, got %+v", statuses)
+	}
+
+	time.Sleep(45 * time.Millisecond)
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed after brief recovery")
+
+	if streak := observer.runtimeFailureHistories["node-a"].failureStreak; streak != 2 {
+		t.Fatalf("expected recovered streak to decay to 2 before re-entry, got %d", streak)
+	}
+	assertBackoffNear(t, time.Until(observer.failures["node-a"].backoffUntil), 80*time.Millisecond)
 }
 
 func TestRuntimeFailureBackoffDoesNotClearWithoutHealthyObservation(t *testing.T) {
@@ -341,6 +419,190 @@ func TestRuntimeFailureBackoffDoesNotClearWithoutHealthyObservation(t *testing.T
 	if len(statuses) != 1 || statuses[0].Alive {
 		t.Fatalf("expected node-a to stay ejected without a healthy observation, got %+v", statuses)
 	}
+}
+
+func TestRecordOutboundFailureIgnoresInactiveOutbound(t *testing.T) {
+	manager := &burstTestHandlerSelectorManager{}
+	manager.SetSelected([]string{"node-b"})
+
+	observer := &Observer{
+		config: &Config{SubjectSelector: []string{"node"}},
+		hp:     newTestHealthPing(),
+		ohm:    manager,
+		runtimeFailure: &RuntimeFailureConfig{
+			BaseBackoff: int64(40 * time.Millisecond),
+			MaxBackoff:  int64(160 * time.Millisecond),
+		},
+	}
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed")
+
+	if len(observer.failures) != 0 {
+		t.Fatalf("expected inactive outbound failures to be ignored, got %+v", observer.failures)
+	}
+	if len(observer.lastFailureTimes) != 0 {
+		t.Fatalf("expected no failure times for inactive outbounds, got %+v", observer.lastFailureTimes)
+	}
+	if len(observer.runtimeFailureHistories) != 0 {
+		t.Fatalf("expected no runtime history for inactive outbounds, got %+v", observer.runtimeFailureHistories)
+	}
+}
+
+func TestRefreshSnapshotPrunesRemovedOutboundState(t *testing.T) {
+	observer := &Observer{
+		hp: newTestHealthPing(),
+		runtimeFailure: &RuntimeFailureConfig{
+			BaseBackoff: int64(40 * time.Millisecond),
+			MaxBackoff:  int64(160 * time.Millisecond),
+		},
+		failures: map[string]liveFailure{
+			"node-a": {lastErrorReason: "request failed", lastFailureTime: 123},
+		},
+		lastFailureTimes: map[string]int64{
+			"node-a": 123,
+			"node-b": 456,
+		},
+		runtimeFailureHistories: map[string]runtimeFailureHistory{
+			"node-a": {failureStreak: 2},
+		},
+	}
+	observer.hp.PutResult("node-a", 20*time.Millisecond)
+	observer.hp.PutResult("node-b", 30*time.Millisecond)
+	observer.hp.Cleanup([]string{"node-b"})
+
+	observer.refreshSnapshotForTags([]string{"node-b"})
+
+	response, err := observer.GetObservation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := response.(*observatory.ObservationResult).Status
+	if len(statuses) != 1 || statuses[0].OutboundTag != "node-b" {
+		t.Fatalf("expected only active outbound node-b after pruning, got %+v", statuses)
+	}
+	if _, found := observer.failures["node-a"]; found {
+		t.Fatal("expected removed outbound live failure to be pruned")
+	}
+	if _, found := observer.lastFailureTimes["node-a"]; found {
+		t.Fatal("expected removed outbound failure time to be pruned")
+	}
+	if _, found := observer.runtimeFailureHistories["node-a"]; found {
+		t.Fatal("expected removed outbound runtime history to be pruned")
+	}
+}
+
+func TestRemovedOutboundPendingReprobeDoesNotRecreateState(t *testing.T) {
+	manager := &burstTestHandlerSelectorManager{}
+	manager.SetSelected([]string{"node-a"})
+
+	var calls atomic.Int32
+	observer := &Observer{
+		config:       &Config{SubjectSelector: []string{"node"}},
+		hp:           newTestHealthPing(),
+		ohm:          manager,
+		reprobeDelay: 20 * time.Millisecond,
+		reprobeFn: func(string) (time.Duration, error) {
+			calls.Add(1)
+			return 25 * time.Millisecond, nil
+		},
+		runtimeFailure: &RuntimeFailureConfig{
+			BaseBackoff: int64(40 * time.Millisecond),
+			MaxBackoff:  int64(160 * time.Millisecond),
+		},
+	}
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed")
+	manager.SetSelected([]string{"node-b"})
+
+	waitForCondition(t, time.Second, func() bool {
+		return !observer.hasPendingReprobe("node-a")
+	}, "expected pending reprobe to finish after removal")
+
+	if calls.Load() != 0 {
+		t.Fatalf("expected removed outbound to skip reprobe, got %d reprobes", calls.Load())
+	}
+	if _, found := observer.failures["node-a"]; found {
+		t.Fatal("expected removed outbound live failure to be cleared")
+	}
+	if _, found := observer.lastFailureTimes["node-a"]; found {
+		t.Fatal("expected removed outbound failure time to be cleared")
+	}
+	if _, found := observer.runtimeFailureHistories["node-a"]; found {
+		t.Fatal("expected removed outbound runtime history to be cleared")
+	}
+	if _, found := observer.hp.Results["node-a"]; found {
+		t.Fatal("expected removed outbound reprobe to avoid recreating health results")
+	}
+}
+
+func TestReintroducedOutboundStartsFreshRuntimeFailureStreak(t *testing.T) {
+	manager := &burstTestHandlerSelectorManager{}
+	manager.SetSelected([]string{"node-a"})
+
+	observer := &Observer{
+		config: &Config{SubjectSelector: []string{"node"}},
+		hp:     newTestHealthPing(),
+		ohm:    manager,
+		runtimeFailure: &RuntimeFailureConfig{
+			BaseBackoff: int64(20 * time.Millisecond),
+			MaxBackoff:  int64(160 * time.Millisecond),
+		},
+	}
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed once")
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed twice")
+	if streak := observer.runtimeFailureHistories["node-a"].failureStreak; streak != 2 {
+		t.Fatalf("expected initial streak 2, got %d", streak)
+	}
+
+	manager.SetSelected([]string{"node-b"})
+	observer.refreshSnapshotForTags([]string{"node-b"})
+	manager.SetSelected([]string{"node-a"})
+	observer.refreshSnapshotForTags([]string{"node-a"})
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed after reintroduction")
+
+	if streak := observer.runtimeFailureHistories["node-a"].failureStreak; streak != 1 {
+		t.Fatalf("expected reintroduced outbound to restart at streak 1, got %d", streak)
+	}
+	assertBackoffNear(t, time.Until(observer.failures["node-a"].backoffUntil), 20*time.Millisecond)
+}
+
+type burstTestHandlerSelectorManager struct {
+	mu       sync.RWMutex
+	selected []string
+}
+
+func (*burstTestHandlerSelectorManager) Start() error { return nil }
+
+func (*burstTestHandlerSelectorManager) Close() error { return nil }
+
+func (*burstTestHandlerSelectorManager) Type() interface{} { return feature_outbound.ManagerType() }
+
+func (*burstTestHandlerSelectorManager) GetHandler(string) feature_outbound.Handler { return nil }
+
+func (*burstTestHandlerSelectorManager) GetDefaultHandler() feature_outbound.Handler { return nil }
+
+func (*burstTestHandlerSelectorManager) AddHandler(context.Context, feature_outbound.Handler) error {
+	return nil
+}
+
+func (*burstTestHandlerSelectorManager) RemoveHandler(context.Context, string) error { return nil }
+
+func (*burstTestHandlerSelectorManager) ListHandlers(context.Context) []feature_outbound.Handler {
+	return nil
+}
+
+func (m *burstTestHandlerSelectorManager) Select([]string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]string(nil), m.selected...)
+}
+
+func (m *burstTestHandlerSelectorManager) SetSelected(tags []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.selected = append([]string(nil), tags...)
 }
 
 func newTestHealthPing() *HealthPing {
