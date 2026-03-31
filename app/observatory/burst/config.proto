@@ -12,6 +12,8 @@ message Config {
   repeated string subject_selector = 2;
 
   HealthPingConfig ping_config = 3;
+
+  RuntimeFailureConfig runtime_failure = 4;
 }
 
 message HealthPingConfig {
@@ -29,4 +31,11 @@ message HealthPingConfig {
   // http method to make request
   string httpMethod = 6;
 
+}
+
+message RuntimeFailureConfig {
+  // base ejection duration after a runtime request failure, int64 values of time.Duration
+  int64 base_backoff = 1;
+  // maximum ejection duration for repeated runtime failures, int64 values of time.Duration
+  int64 max_backoff = 2;
 }

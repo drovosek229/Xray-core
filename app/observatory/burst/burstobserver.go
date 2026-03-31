@@ -18,6 +18,7 @@ import (
 )
 
 const runtimeFailureReprobeDelay = 250 * time.Millisecond
+const maxDuration = time.Duration(1<<63 - 1)
 
 type Observer struct {
 	config *Config
@@ -36,16 +37,23 @@ type Observer struct {
 
 	finished *done.Instance
 
-	ohm outbound.Manager
+	ohm            outbound.Manager
+	runtimeFailure *RuntimeFailureConfig
 }
 
 type liveFailure struct {
-	lastErrorReason string
-	lastTryTime     int64
-	lastFailureTime int64
+	lastErrorReason     string
+	lastTryTime         int64
+	lastFailureTime     int64
+	failedAt            time.Time
+	failureStreak       int32
+	backoffUntil        time.Time
+	healthySinceFailure bool
 }
 
 func (o *Observer) GetObservation(ctx context.Context) (proto.Message, error) {
+	o.releaseRecoveredFailures()
+
 	o.statusLock.RLock()
 	status := cloneObservationStatuses(o.status)
 	failures := cloneLiveFailures(o.failures)
@@ -138,9 +146,25 @@ func (o *Observer) refreshSnapshot() {
 func (o *Observer) setStatusSnapshot(status []*observatory.OutboundStatus) {
 	o.statusLock.Lock()
 	defer o.statusLock.Unlock()
-	for _, snapshot := range status {
-		if snapshot != nil && snapshot.Alive {
-			delete(o.failures, snapshot.OutboundTag)
+
+	if len(o.failures) != 0 {
+		if !o.runtimeFailureEnabled() {
+			for _, snapshot := range status {
+				if snapshot != nil && snapshot.Alive {
+					delete(o.failures, snapshot.OutboundTag)
+				}
+			}
+		} else {
+			for tag, observedAt := range o.latestHealthyObservationTimesLocked() {
+				failure, found := o.failures[tag]
+				if !found || observedAt.Before(failure.failedAt) {
+					continue
+				}
+				failure.healthySinceFailure = true
+				failure.lastTryTime = observedAt.Unix()
+				o.failures[tag] = failure
+			}
+			o.releaseRecoveredFailuresLocked(time.Now())
 		}
 	}
 	o.status = status
@@ -167,13 +191,24 @@ func (o *Observer) setLiveFailure(outboundTag, reason string) {
 	if o.lastFailureTimes == nil {
 		o.lastFailureTimes = make(map[string]int64)
 	}
-	failedAt := time.Now().UnixMilli()
-	o.lastFailureTimes[outboundTag] = failedAt
-	o.failures[outboundTag] = liveFailure{
-		lastErrorReason: reason,
-		lastTryTime:     time.Now().Unix(),
-		lastFailureTime: failedAt,
+	failedAt := time.Now()
+	failedAtMillis := failedAt.UnixMilli()
+	streak := int32(1)
+	if failure, found := o.failures[outboundTag]; found && failure.failureStreak > 0 {
+		streak = failure.failureStreak + 1
 	}
+	o.lastFailureTimes[outboundTag] = failedAtMillis
+	failure := liveFailure{
+		lastErrorReason: reason,
+		lastTryTime:     failedAt.Unix(),
+		lastFailureTime: failedAtMillis,
+		failedAt:        failedAt,
+		failureStreak:   streak,
+	}
+	if o.runtimeFailureEnabled() {
+		failure.backoffUntil = failedAt.Add(o.computeRuntimeFailureBackoff(streak))
+	}
+	o.failures[outboundTag] = failure
 }
 
 func (o *Observer) clearLiveFailure(outboundTag string) {
@@ -183,6 +218,32 @@ func (o *Observer) clearLiveFailure(outboundTag string) {
 		return
 	}
 	delete(o.failures, outboundTag)
+}
+
+func (o *Observer) noteLiveFailureProbeFailure(outboundTag, reason string) {
+	o.statusLock.Lock()
+	defer o.statusLock.Unlock()
+
+	failure, found := o.failures[outboundTag]
+	if !found {
+		return
+	}
+	failure.lastErrorReason = reason
+	failure.lastTryTime = time.Now().Unix()
+	o.failures[outboundTag] = failure
+}
+
+func (o *Observer) markLiveFailureHealthy(outboundTag string, observedAt time.Time) {
+	o.statusLock.Lock()
+	defer o.statusLock.Unlock()
+
+	failure, found := o.failures[outboundTag]
+	if !found || observedAt.Before(failure.failedAt) {
+		return
+	}
+	failure.healthySinceFailure = true
+	failure.lastTryTime = observedAt.Unix()
+	o.failures[outboundTag] = failure
 }
 
 func (o *Observer) scheduleFailureReprobe(outboundTag string) {
@@ -221,13 +282,14 @@ func (o *Observer) runFailureReprobe(outboundTag string) {
 	delay, err := o.probeFailureOutbound(outboundTag)
 	if err != nil {
 		o.hp.PutResult(outboundTag, rttFailed)
-		o.setLiveFailure(outboundTag, "burst reprobe failed: "+err.Error())
+		o.noteLiveFailureProbeFailure(outboundTag, "burst reprobe failed: "+err.Error())
 		o.refreshSnapshot()
 		return
 	}
 
+	observedAt := time.Now()
 	o.hp.PutResult(outboundTag, delay)
-	o.clearLiveFailure(outboundTag)
+	o.markLiveFailureHealthy(outboundTag, observedAt)
 	o.refreshSnapshot()
 }
 
@@ -315,6 +377,115 @@ func cloneFailureTimes(failureTimes map[string]int64) map[string]int64 {
 	return clones
 }
 
+func (o *Observer) runtimeFailureEnabled() bool {
+	return o.runtimeFailure != nil && o.runtimeFailure.GetBaseBackoff() > 0
+}
+
+func (o *Observer) computeRuntimeFailureBackoff(streak int32) time.Duration {
+	if !o.runtimeFailureEnabled() {
+		return 0
+	}
+
+	backoff := time.Duration(o.runtimeFailure.GetBaseBackoff())
+	maxBackoff := time.Duration(o.runtimeFailure.GetMaxBackoff())
+	if streak <= 1 || backoff >= maxBackoff {
+		return backoff
+	}
+	for i := int32(1); i < streak && backoff < maxBackoff; i++ {
+		if backoff > maxBackoff/2 {
+			backoff = maxBackoff
+			break
+		}
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+	return backoff
+}
+
+func (o *Observer) latestHealthyObservationTimesLocked() map[string]time.Time {
+	if len(o.failures) == 0 || o.hp == nil {
+		return nil
+	}
+
+	o.hp.access.Lock()
+	defer o.hp.access.Unlock()
+
+	observed := make(map[string]time.Time, len(o.failures))
+	for tag := range o.failures {
+		result := o.hp.Results[tag]
+		if result == nil {
+			continue
+		}
+		_, lastSeen := result.LatestTimes()
+		if !lastSeen.IsZero() {
+			observed[tag] = lastSeen
+		}
+	}
+	return observed
+}
+
+func (o *Observer) releaseRecoveredFailures() {
+	o.statusLock.Lock()
+	defer o.statusLock.Unlock()
+	o.releaseRecoveredFailuresLocked(time.Now())
+}
+
+func (o *Observer) releaseRecoveredFailuresLocked(now time.Time) {
+	if len(o.failures) == 0 {
+		return
+	}
+
+	for tag, failure := range o.failures {
+		if o.canClearLiveFailure(failure, now) {
+			delete(o.failures, tag)
+		}
+	}
+}
+
+func (o *Observer) canClearLiveFailure(failure liveFailure, now time.Time) bool {
+	if !failure.healthySinceFailure {
+		return false
+	}
+	if !o.runtimeFailureEnabled() {
+		return true
+	}
+	return failure.backoffUntil.IsZero() || !now.Before(failure.backoffUntil)
+}
+
+func safeMultiplyDuration(value time.Duration, factor int) time.Duration {
+	if value <= 0 || factor <= 0 {
+		return 0
+	}
+
+	multiplier := time.Duration(factor)
+	if value > maxDuration/multiplier {
+		return maxDuration
+	}
+	return value * multiplier
+}
+
+func normalizeRuntimeFailureConfig(config *RuntimeFailureConfig) *RuntimeFailureConfig {
+	if config == nil || config.GetBaseBackoff() <= 0 {
+		return nil
+	}
+
+	normalized := *config
+	baseBackoff := time.Duration(normalized.GetBaseBackoff())
+	maxBackoff := time.Duration(normalized.GetMaxBackoff())
+	if maxBackoff <= 0 {
+		maxBackoff = safeMultiplyDuration(baseBackoff, 8)
+	}
+	if maxBackoff < baseBackoff {
+		maxBackoff = baseBackoff
+	}
+
+	normalized.BaseBackoff = int64(baseBackoff)
+	normalized.MaxBackoff = int64(maxBackoff)
+	return &normalized
+}
+
 func applyLiveFailures(statuses []*observatory.OutboundStatus, failures map[string]liveFailure) []*observatory.OutboundStatus {
 	if len(failures) == 0 {
 		return statuses
@@ -355,9 +526,15 @@ func applyLiveFailures(statuses []*observatory.OutboundStatus, failures map[stri
 }
 
 func New(ctx context.Context, config *Config) (*Observer, error) {
+	var runtimeFailure *RuntimeFailureConfig
+	if config != nil {
+		runtimeFailure = normalizeRuntimeFailureConfig(config.GetRuntimeFailure())
+	}
+
 	observer := &Observer{
-		config: config,
-		ctx:    ctx,
+		config:         config,
+		ctx:            ctx,
+		runtimeFailure: runtimeFailure,
 	}
 	if err := core.RequireFeatures(ctx, func(om outbound.Manager, rd routing.Dispatcher) {
 		observer.ohm = om

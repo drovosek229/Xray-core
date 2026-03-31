@@ -9,8 +9,8 @@ import (
 
 	"github.com/xtls/xray-core/app/commander"
 	"github.com/xtls/xray-core/app/observatory"
-	observatoryservice "github.com/xtls/xray-core/app/observatory/command"
 	"github.com/xtls/xray-core/app/observatory/burst"
+	observatoryservice "github.com/xtls/xray-core/app/observatory/command"
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/app/router"
 	"github.com/xtls/xray-core/common"
@@ -32,6 +32,8 @@ import (
 )
 
 func TestBurstObservatoryRouteFailover(t *testing.T) {
+	const runtimeFailureBackoff = 1500 * time.Millisecond
+
 	probePort := tcp.PickPort()
 	probeServer := &v2httptest.Server{
 		Port: probePort,
@@ -80,7 +82,7 @@ func TestBurstObservatoryRouteFailover(t *testing.T) {
 					},
 				},
 			}),
-			serial.ToTypedMessage(newBurstObservatoryConfig("outer-", probePort)),
+			serial.ToTypedMessage(newBurstObservatoryConfig("outer-", probePort, runtimeFailureBackoff)),
 		},
 		Inbound: []*core.InboundHandlerConfig{
 			{
@@ -123,12 +125,25 @@ func TestBurstObservatoryRouteFailover(t *testing.T) {
 		"outer-b": true,
 	})
 
+	time.Sleep(500 * time.Millisecond)
+	waitForObservedAlive(t, statusClient, map[string]bool{
+		"outer-a": false,
+		"outer-b": true,
+	})
+
 	if err := testTCPConn(clientPort, 1024, 5*time.Second)(); err != nil {
 		t.Fatal(err)
 	}
+
+	waitForObservedAlive(t, statusClient, map[string]bool{
+		"outer-a": true,
+		"outer-b": true,
+	})
 }
 
 func TestBurstObservatoryDialerProxyFailover(t *testing.T) {
+	const runtimeFailureBackoff = 1500 * time.Millisecond
+
 	probePort := tcp.PickPort()
 	probeServer := &v2httptest.Server{
 		Port: probePort,
@@ -169,7 +184,7 @@ func TestBurstObservatoryDialerProxyFailover(t *testing.T) {
 					},
 				},
 			}),
-			serial.ToTypedMessage(newBurstObservatoryConfig("proxy-", probePort)),
+			serial.ToTypedMessage(newBurstObservatoryConfig("proxy-", probePort, runtimeFailureBackoff)),
 		},
 		Inbound: []*core.InboundHandlerConfig{
 			{
@@ -187,7 +202,7 @@ func TestBurstObservatoryDialerProxyFailover(t *testing.T) {
 		},
 		Outbound: []*core.OutboundHandlerConfig{
 			{
-				Tag: "outer",
+				Tag:           "outer",
 				ProxySettings: serial.ToTypedMessage(&freedom.Config{}),
 				SenderSettings: serial.ToTypedMessage(&proxyman.SenderConfig{
 					ProxySettings:     &internet.ProxyConfig{Tag: "proxy-balancer"},
@@ -220,9 +235,20 @@ func TestBurstObservatoryDialerProxyFailover(t *testing.T) {
 		"proxy-b": true,
 	})
 
+	time.Sleep(500 * time.Millisecond)
+	waitForObservedAlive(t, statusClient, map[string]bool{
+		"proxy-a": false,
+		"proxy-b": true,
+	})
+
 	if err := testTCPConn(clientPort, 1024, 5*time.Second)(); err != nil {
 		t.Fatal(err)
 	}
+
+	waitForObservedAlive(t, statusClient, map[string]bool{
+		"proxy-a": true,
+		"proxy-b": true,
+	})
 }
 
 func newBurstProxyServerConfig(listenPort net.Port, userID *protocol.ID, requestedPort net.Port, override *net.Destination) *core.Config {
@@ -308,7 +334,13 @@ func newObservatoryCommanderConfig(cmdPort net.Port) *commander.Config {
 	}
 }
 
-func newBurstObservatoryConfig(selector string, probePort net.Port) *burst.Config {
+func newBurstObservatoryConfig(selector string, probePort net.Port, runtimeFailureBackoff time.Duration) *burst.Config {
+	var runtimeFailure *burst.RuntimeFailureConfig
+	if runtimeFailureBackoff > 0 {
+		runtimeFailure = &burst.RuntimeFailureConfig{
+			BaseBackoff: int64(runtimeFailureBackoff),
+		}
+	}
 	return &burst.Config{
 		SubjectSelector: []string{selector},
 		PingConfig: &burst.HealthPingConfig{
@@ -318,6 +350,7 @@ func newBurstObservatoryConfig(selector string, probePort net.Port) *burst.Confi
 			Timeout:       int64(2 * time.Second),
 			HttpMethod:    http.MethodGet,
 		},
+		RuntimeFailure: runtimeFailure,
 	}
 }
 

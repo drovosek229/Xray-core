@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/xtls/xray-core/app/observatory"
+	"github.com/xtls/xray-core/common/signal/done"
 )
 
 func TestLiveFailureOverlayMarksOutboundDeadImmediately(t *testing.T) {
@@ -86,6 +87,61 @@ func TestSuccessfulProbeClearsLiveFailureOverlay(t *testing.T) {
 	}
 }
 
+func TestRuntimeFailureBackoffKeepsOverlayUntilHealthyObservationAndExpiry(t *testing.T) {
+	observer := &Observer{
+		hp: newTestHealthPing(),
+		runtimeFailure: &RuntimeFailureConfig{
+			BaseBackoff: int64(80 * time.Millisecond),
+			MaxBackoff:  int64(320 * time.Millisecond),
+		},
+	}
+	observer.finished = done.New()
+	_ = observer.finished.Close()
+	observer.setStatusSnapshot([]*observatory.OutboundStatus{
+		{
+			Alive:       true,
+			Delay:       20,
+			OutboundTag: "node-a",
+		},
+	})
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed")
+	observer.refreshSnapshot()
+
+	response, err := observer.GetObservation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := response.(*observatory.ObservationResult).Status
+	if len(statuses) != 1 || statuses[0].Alive {
+		t.Fatalf("expected node-a to remain ejected before any healthy observation, got %+v", statuses)
+	}
+
+	observer.hp.PutResult("node-a", 25*time.Millisecond)
+	observer.markLiveFailureHealthy("node-a", time.Now())
+	observer.refreshSnapshot()
+
+	response, err = observer.GetObservation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses = response.(*observatory.ObservationResult).Status
+	if len(statuses) != 1 || statuses[0].Alive {
+		t.Fatalf("expected node-a to remain ejected until backoff expires, got %+v", statuses)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	response, err = observer.GetObservation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses = response.(*observatory.ObservationResult).Status
+	if len(statuses) != 1 || !statuses[0].Alive {
+		t.Fatalf("expected node-a to recover after healthy observation and backoff expiry, got %+v", statuses)
+	}
+}
+
 func TestRuntimeFailureReprobeDebouncesDuplicates(t *testing.T) {
 	var calls atomic.Int32
 	started := make(chan struct{}, 2)
@@ -133,6 +189,10 @@ func TestSuccessfulReprobeClearsLiveFailureOverlayAsynchronously(t *testing.T) {
 	observer := &Observer{
 		hp:           newTestHealthPing(),
 		reprobeDelay: 30 * time.Millisecond,
+		runtimeFailure: &RuntimeFailureConfig{
+			BaseBackoff: int64(80 * time.Millisecond),
+			MaxBackoff:  int64(320 * time.Millisecond),
+		},
 		reprobeFn: func(string) (time.Duration, error) {
 			return 25 * time.Millisecond, nil
 		},
@@ -163,10 +223,21 @@ func TestSuccessfulReprobeClearsLiveFailureOverlayAsynchronously(t *testing.T) {
 		}
 		statuses := response.(*observatory.ObservationResult).Status
 		return len(statuses) == 1 &&
-			statuses[0].Alive &&
-			statuses[0].LastErrorReason == "" &&
+			!statuses[0].Alive &&
+			statuses[0].LastErrorReason == "request failed" &&
 			statuses[0].LastFailureTime != 0
-	}, "expected successful reprobe to restore node-a")
+	}, "expected successful reprobe to keep node-a ejected until backoff expires")
+
+	time.Sleep(100 * time.Millisecond)
+
+	response, err = observer.GetObservation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses = response.(*observatory.ObservationResult).Status
+	if len(statuses) != 1 || !statuses[0].Alive || statuses[0].LastErrorReason != "" || statuses[0].LastFailureTime == 0 {
+		t.Fatalf("expected node-a to restore after backoff expiry, got %+v", statuses)
+	}
 }
 
 func TestFailedReprobeKeepsLiveFailureOverlayAndRecordsFailureSample(t *testing.T) {
@@ -205,6 +276,73 @@ func TestFailedReprobeKeepsLiveFailureOverlayAndRecordsFailureSample(t *testing.
 	}
 }
 
+func TestRuntimeFailureBackoffGrowsAndClamps(t *testing.T) {
+	observer := &Observer{
+		runtimeFailure: &RuntimeFailureConfig{
+			BaseBackoff: int64(20 * time.Millisecond),
+			MaxBackoff:  int64(50 * time.Millisecond),
+		},
+	}
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed once")
+	first := observer.failures["node-a"]
+	assertBackoffNear(t, time.Until(first.backoffUntil), 20*time.Millisecond)
+	if first.failureStreak != 1 {
+		t.Fatalf("expected first failure streak to be 1, got %d", first.failureStreak)
+	}
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed twice")
+	second := observer.failures["node-a"]
+	assertBackoffNear(t, time.Until(second.backoffUntil), 40*time.Millisecond)
+	if second.failureStreak != 2 {
+		t.Fatalf("expected second failure streak to be 2, got %d", second.failureStreak)
+	}
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed thrice")
+	third := observer.failures["node-a"]
+	assertBackoffNear(t, time.Until(third.backoffUntil), 50*time.Millisecond)
+	if third.failureStreak != 3 {
+		t.Fatalf("expected third failure streak to be 3, got %d", third.failureStreak)
+	}
+}
+
+func TestRuntimeFailureBackoffDoesNotClearWithoutHealthyObservation(t *testing.T) {
+	observer := &Observer{
+		hp: newTestHealthPing(),
+		runtimeFailure: &RuntimeFailureConfig{
+			BaseBackoff: int64(40 * time.Millisecond),
+			MaxBackoff:  int64(160 * time.Millisecond),
+		},
+	}
+	observer.finished = done.New()
+	_ = observer.finished.Close()
+	observer.setStatusSnapshot([]*observatory.OutboundStatus{
+		{
+			Alive:       true,
+			Delay:       20,
+			OutboundTag: "node-a",
+		},
+	})
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed")
+	observer.refreshSnapshot()
+
+	observer.statusLock.Lock()
+	failure := observer.failures["node-a"]
+	failure.backoffUntil = time.Now().Add(-time.Millisecond)
+	observer.failures["node-a"] = failure
+	observer.statusLock.Unlock()
+
+	response, err := observer.GetObservation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := response.(*observatory.ObservationResult).Status
+	if len(statuses) != 1 || statuses[0].Alive {
+		t.Fatalf("expected node-a to stay ejected without a healthy observation, got %+v", statuses)
+	}
+}
+
 func newTestHealthPing() *HealthPing {
 	return &HealthPing{
 		ctx: context.Background(),
@@ -238,4 +376,12 @@ func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool
 	}
 
 	t.Fatal(message)
+}
+
+func assertBackoffNear(t *testing.T, got, want time.Duration) {
+	t.Helper()
+
+	if got < want-15*time.Millisecond || got > want+15*time.Millisecond {
+		t.Fatalf("expected backoff near %s, got %s", want, got)
+	}
 }
