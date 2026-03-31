@@ -187,7 +187,27 @@ func loadFile(file, code string) ([]byte, error) {
 
 func loadFileWithAssetResolver(file, code string, resolver geoAssetPathProvider) ([]byte, error) {
 	runtime.GC()
-	r, err := filesystem.NewFileReader(resolveGeoAssetPath(file, resolver))
+	path := resolveGeoAssetPath(file, resolver)
+	bs, err := loadGeoAssetFileAtPath(file, code, path)
+	if err == nil || resolver == nil || !isManagedGeoAssetFile(file) {
+		return bs, err
+	}
+
+	localPath := platform.GetAssetLocation(file)
+	if localPath == path {
+		return nil, err
+	}
+
+	bs, localErr := loadGeoAssetFileAtPath(file, code, localPath)
+	if localErr == nil {
+		return bs, nil
+	}
+
+	return nil, err
+}
+
+func loadGeoAssetFileAtPath(file, code, path string) ([]byte, error) {
+	r, err := filesystem.NewFileReader(path)
 	if err != nil {
 		return nil, errors.New("failed to open file: ", file).Base(err)
 	}
@@ -197,6 +217,10 @@ func loadFileWithAssetResolver(file, code string, resolver geoAssetPathProvider)
 		return nil, errors.New("code not found in ", file, ": ", code)
 	}
 	return bs, nil
+}
+
+func isManagedGeoAssetFile(file string) bool {
+	return file == geoAssetKindGeoIP.fileName() || file == geoAssetKindGeoSite.fileName()
 }
 
 func loadIP(file, code string) ([]*router.CIDR, error) {

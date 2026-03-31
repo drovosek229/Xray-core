@@ -13,6 +13,7 @@ import (
 
 	approver "github.com/xtls/xray-core/app/router"
 	xraynet "github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/platform"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -182,6 +183,35 @@ func TestPrepareRemoteGeoAssetUsesLastKnownGoodCacheOnStaleRefreshFailure(t *tes
 	}
 }
 
+func TestPrepareRemoteGeoAssetFallsBackToLocalAssetWithoutUsableCache(t *testing.T) {
+	setupGeoAssetTestEnv(t)
+
+	assetDir := setupLocalGeoAssetDir(t)
+	writeLocalGeoAsset(t, assetDir, geoAssetKindGeoIP, mustMarshalProto(t, geoIPListForOctet(5)))
+
+	server := newRemoteGeoAssetServer(t, map[string]remoteGeoAssetResponse{
+		"/geoip.dat": {status: http.StatusInternalServerError, body: []byte("boom")},
+	})
+
+	resolver, err := prepareGeoAssetResolver(&GeoAssetsConfig{
+		GeoIP: &RemoteGeoAssetConfig{URL: server.URL + "/geoip.dat"},
+	})
+	if err != nil {
+		t.Fatalf("prepareGeoAssetResolver() should have fallen back to the local asset: %v", err)
+	}
+
+	geoipList, err := ToCidrListWithAssetResolver(StringList{"geoip:us"}, resolver)
+	if err != nil {
+		t.Fatalf("ToCidrListWithAssetResolver() failed: %v", err)
+	}
+	if got := geoipList[0].Cidr[0].Ip[0]; got != 5 {
+		t.Fatalf("expected local payload to be used, got first octet %d", got)
+	}
+	if got := resolver.AssetPath("geoip.dat"); got != filepath.Join(assetDir, "geoip.dat") {
+		t.Fatalf("expected resolver to use local asset path, got %q", got)
+	}
+}
+
 func TestPrepareRemoteGeoAssetFailsWithoutUsableCache(t *testing.T) {
 	setupGeoAssetTestEnv(t)
 
@@ -194,6 +224,44 @@ func TestPrepareRemoteGeoAssetFailsWithoutUsableCache(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected prepareGeoAssetResolver() to fail without a usable cache")
+	}
+}
+
+func TestRemoteGeoIPLookupFallsBackToLocalWhenRemoteCodeIsMissing(t *testing.T) {
+	setupGeoAssetTestEnv(t)
+
+	assetDir := setupLocalGeoAssetDir(t)
+	writeLocalGeoAsset(t, assetDir, geoAssetKindGeoIP, mustMarshalProto(t, geoIPListForOctet(6)))
+	remotePayload := mustMarshalProto(t, &approver.GeoIPList{
+		Entry: []*approver.GeoIP{
+			{
+				CountryCode: "CA",
+				Cidr: []*approver.CIDR{
+					{
+						Ip:     []byte{9, 9, 9, 0},
+						Prefix: 24,
+					},
+				},
+			},
+		},
+	})
+	server := newRemoteGeoAssetServer(t, map[string]remoteGeoAssetResponse{
+		"/geoip.dat": {status: http.StatusOK, body: remotePayload},
+	})
+
+	resolver, err := prepareGeoAssetResolver(&GeoAssetsConfig{
+		GeoIP: &RemoteGeoAssetConfig{URL: server.URL + "/geoip.dat"},
+	})
+	if err != nil {
+		t.Fatalf("prepareGeoAssetResolver() failed: %v", err)
+	}
+
+	geoipList, err := ToCidrListWithAssetResolver(StringList{"geoip:us"}, resolver)
+	if err != nil {
+		t.Fatalf("ToCidrListWithAssetResolver() should have fallen back to the local asset: %v", err)
+	}
+	if got := geoipList[0].Cidr[0].Ip[0]; got != 6 {
+		t.Fatalf("expected local payload to satisfy the missing remote code, got first octet %d", got)
 	}
 }
 
@@ -228,6 +296,56 @@ func TestPrepareRemoteGeoAssetRejectsInvalidRefreshWithoutReplacingCache(t *test
 	}
 	if !bytes.Equal(gotPayload, cachedPayload) {
 		t.Fatal("cached payload was replaced by an invalid download")
+	}
+}
+
+func TestRemoteGeositeLookupFallsBackToLocalWhenRemoteCodeIsMissing(t *testing.T) {
+	setupGeoAssetTestEnv(t)
+
+	assetDir := setupLocalGeoAssetDir(t)
+	writeLocalGeoAsset(t, assetDir, geoAssetKindGeoSite, mustMarshalProto(t, &approver.GeoSiteList{
+		Entry: []*approver.GeoSite{
+			{
+				CountryCode: "US",
+				Domain: []*approver.Domain{
+					{
+						Type:  approver.Domain_Domain,
+						Value: "example.com",
+					},
+				},
+			},
+		},
+	}))
+	remotePayload := mustMarshalProto(t, &approver.GeoSiteList{
+		Entry: []*approver.GeoSite{
+			{
+				CountryCode: "CA",
+				Domain: []*approver.Domain{
+					{
+						Type:  approver.Domain_Domain,
+						Value: "example.ca",
+					},
+				},
+			},
+		},
+	})
+	server := newRemoteGeoAssetServer(t, map[string]remoteGeoAssetResponse{
+		"/geosite.dat": {status: http.StatusOK, body: remotePayload},
+	})
+
+	resolver, err := prepareGeoAssetResolver(&GeoAssetsConfig{
+		GeoSite: &RemoteGeoAssetConfig{URL: server.URL + "/geosite.dat"},
+	})
+	if err != nil {
+		t.Fatalf("prepareGeoAssetResolver() failed: %v", err)
+	}
+
+	domains, err := loadGeositeWithAttrWithAssetResolver("geosite.dat", "us", resolver)
+	if err != nil {
+		t.Fatalf("loadGeositeWithAttrWithAssetResolver() should have fallen back to the local asset: %v", err)
+	}
+	if len(domains) != 1 || domains[0].Value != "example.com" {
+		t.Fatalf("expected local geosite entry to be used, got %+v", domains)
 	}
 }
 
@@ -318,6 +436,23 @@ func setupGeoAssetTestEnv(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(homeDir, "xdg-cache"))
+}
+
+func setupLocalGeoAssetDir(t *testing.T) string {
+	t.Helper()
+
+	assetDir := t.TempDir()
+	t.Setenv(platform.NormalizeEnvName(platform.AssetLocation), assetDir)
+	return assetDir
+}
+
+func writeLocalGeoAsset(t *testing.T, assetDir string, kind geoAssetKind, payload []byte) {
+	t.Helper()
+
+	path := filepath.Join(assetDir, kind.fileName())
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatalf("failed to write local geo asset %s: %v", kind.fileName(), err)
+	}
 }
 
 func geoIPListForOctet(octet byte) *approver.GeoIPList {

@@ -80,14 +80,14 @@ func prepareGeoAssetResolver(config *GeoAssetsConfig) (*geoAssetResolver, error)
 
 	resolver := &geoAssetResolver{paths: make(map[string]string, 2)}
 	if config.GeoIP != nil {
-		path, err := prepareRemoteGeoAsset(geoAssetKindGeoIP, config.GeoIP)
+		path, err := prepareGeoAssetPathWithLocalFallback(geoAssetKindGeoIP, config.GeoIP)
 		if err != nil {
 			return nil, err
 		}
 		resolver.paths[geoAssetKindGeoIP.fileName()] = path
 	}
 	if config.GeoSite != nil {
-		path, err := prepareRemoteGeoAsset(geoAssetKindGeoSite, config.GeoSite)
+		path, err := prepareGeoAssetPathWithLocalFallback(geoAssetKindGeoSite, config.GeoSite)
 		if err != nil {
 			return nil, err
 		}
@@ -101,6 +101,21 @@ func resolveGeoAssetPath(file string, resolver geoAssetPathProvider) string {
 		return resolver.AssetPath(file)
 	}
 	return platform.GetAssetLocation(file)
+}
+
+func prepareGeoAssetPathWithLocalFallback(kind geoAssetKind, config *RemoteGeoAssetConfig) (string, error) {
+	path, err := prepareRemoteGeoAsset(kind, config)
+	if err == nil {
+		return path, nil
+	}
+
+	localPath := platform.GetAssetLocation(kind.fileName())
+	localErr := validateGeoAssetFile(kind, localPath)
+	if localErr == nil {
+		return localPath, nil
+	}
+
+	return "", fmt.Errorf("%w; local fallback unavailable: %v", err, localErr)
 }
 
 func prepareRemoteGeoAsset(kind geoAssetKind, config *RemoteGeoAssetConfig) (string, error) {
