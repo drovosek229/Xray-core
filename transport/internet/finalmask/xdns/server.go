@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xtls/xray-core/common/errors"
-	"github.com/xtls/xray-core/transport/internet/finalmask"
+	"github.com/drovosek229/Xray-core/common/errors"
+	"github.com/drovosek229/Xray-core/transport/internet/finalmask"
 )
 
 const (

@@ -3,7 +3,7 @@
 package net
 
 import (
-	"github.com/xtls/xray-core/common/errors"
+	"github.com/drovosek229/Xray-core/common/errors"
 )
 
 func FindProcess(dest Destination) (int, string, string, error) {

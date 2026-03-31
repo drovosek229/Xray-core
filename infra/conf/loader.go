@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/xtls/xray-core/common/errors"
+	"github.com/drovosek229/Xray-core/common/errors"
 )
 
 type ConfigCreator func() interface{}

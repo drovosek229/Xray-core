@@ -3,9 +3,9 @@ package all
 import (
 	"os"
 
-	"github.com/xtls/xray-core/common/platform"
-	"github.com/xtls/xray-core/infra/conf/serial"
-	"github.com/xtls/xray-core/main/commands/base"
+	"github.com/drovosek229/Xray-core/common/platform"
+	"github.com/drovosek229/Xray-core/infra/conf/serial"
+	"github.com/drovosek229/Xray-core/main/commands/base"
 )
 
 var cmdBuildMphCache = &base.Command{

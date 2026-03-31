@@ -3,7 +3,7 @@ package bitmask_test
 import (
 	"testing"
 
-	. "github.com/xtls/xray-core/common/bitmask"
+	. "github.com/drovosek229/Xray-core/common/bitmask"
 )
 
 func TestBitmaskByte(t *testing.T) {

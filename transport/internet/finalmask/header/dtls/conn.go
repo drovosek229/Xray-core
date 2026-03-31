@@ -3,7 +3,7 @@ package dtls
 import (
 	"net"
 
-	"github.com/xtls/xray-core/common/dice"
+	"github.com/drovosek229/Xray-core/common/dice"
 )
 
 type dtls struct {

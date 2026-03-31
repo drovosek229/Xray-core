@@ -6,7 +6,7 @@ import (
 	"io"
 	"runtime"
 
-	"github.com/xtls/xray-core/common/strmatcher"
+	"github.com/drovosek229/Xray-core/common/strmatcher"
 )
 
 type geoSiteListGob struct {

@@ -3,7 +3,7 @@ package pubsub_test
 import (
 	"testing"
 
-	. "github.com/xtls/xray-core/common/signal/pubsub"
+	. "github.com/drovosek229/Xray-core/common/signal/pubsub"
 )
 
 func TestPubsub(t *testing.T) {

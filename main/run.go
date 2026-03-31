@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/xtls/xray-core/common/cmdarg"
-	"github.com/xtls/xray-core/common/errors"
-	clog "github.com/xtls/xray-core/common/log"
-	"github.com/xtls/xray-core/common/platform"
-	"github.com/xtls/xray-core/core"
-	"github.com/xtls/xray-core/main/commands/base"
+	"github.com/drovosek229/Xray-core/common/cmdarg"
+	"github.com/drovosek229/Xray-core/common/errors"
+	clog "github.com/drovosek229/Xray-core/common/log"
+	"github.com/drovosek229/Xray-core/common/platform"
+	"github.com/drovosek229/Xray-core/core"
+	"github.com/drovosek229/Xray-core/main/commands/base"
 )
 
 var cmdRun = &base.Command{

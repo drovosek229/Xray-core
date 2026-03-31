@@ -6,15 +6,15 @@ import (
 	"io"
 	"testing"
 
-	"github.com/xtls/xray-core/app/proxyman"
-	"github.com/xtls/xray-core/common/buf"
-	xerrors "github.com/xtls/xray-core/common/errors"
-	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/session"
-	"github.com/xtls/xray-core/features/extension"
-	feature_outbound "github.com/xtls/xray-core/features/outbound"
-	"github.com/xtls/xray-core/transport"
-	"github.com/xtls/xray-core/transport/internet"
+	"github.com/drovosek229/Xray-core/app/proxyman"
+	"github.com/drovosek229/Xray-core/common/buf"
+	xerrors "github.com/drovosek229/Xray-core/common/errors"
+	"github.com/drovosek229/Xray-core/common/net"
+	"github.com/drovosek229/Xray-core/common/session"
+	"github.com/drovosek229/Xray-core/features/extension"
+	feature_outbound "github.com/drovosek229/Xray-core/features/outbound"
+	"github.com/drovosek229/Xray-core/transport"
+	"github.com/drovosek229/Xray-core/transport/internet"
 )
 
 type retryTestProxy struct {

@@ -11,17 +11,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/drovosek229/Xray-core/common"
+	"github.com/drovosek229/Xray-core/common/buf"
+	"github.com/drovosek229/Xray-core/common/net"
+	"github.com/drovosek229/Xray-core/common/protocol/tls/cert"
+	"github.com/drovosek229/Xray-core/testing/servers/tcp"
+	"github.com/drovosek229/Xray-core/testing/servers/udp"
+	"github.com/drovosek229/Xray-core/transport/internet"
+	. "github.com/drovosek229/Xray-core/transport/internet/splithttp"
+	"github.com/drovosek229/Xray-core/transport/internet/stat"
+	"github.com/drovosek229/Xray-core/transport/internet/tls"
 	"github.com/google/go-cmp/cmp"
-	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/buf"
-	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/protocol/tls/cert"
-	"github.com/xtls/xray-core/testing/servers/tcp"
-	"github.com/xtls/xray-core/testing/servers/udp"
-	"github.com/xtls/xray-core/transport/internet"
-	. "github.com/xtls/xray-core/transport/internet/splithttp"
-	"github.com/xtls/xray-core/transport/internet/stat"
-	"github.com/xtls/xray-core/transport/internet/tls"
 )
 
 func Test_ListenXHAndDial(t *testing.T) {

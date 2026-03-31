@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/crypto"
-	"github.com/xtls/xray-core/common/utils"
-	"github.com/xtls/xray-core/transport/internet"
+	"github.com/drovosek229/Xray-core/common"
+	"github.com/drovosek229/Xray-core/common/crypto"
+	"github.com/drovosek229/Xray-core/common/utils"
+	"github.com/drovosek229/Xray-core/transport/internet"
 )
 
 func (c *Config) GetNormalizedPath() string {

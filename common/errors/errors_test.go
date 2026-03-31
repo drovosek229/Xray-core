@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	. "github.com/drovosek229/Xray-core/common/errors"
+	"github.com/drovosek229/Xray-core/common/log"
 	"github.com/google/go-cmp/cmp"
-	. "github.com/xtls/xray-core/common/errors"
-	"github.com/xtls/xray-core/common/log"
 )
 
 func TestError(t *testing.T) {

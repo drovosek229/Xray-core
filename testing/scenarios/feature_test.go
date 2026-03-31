@@ -8,30 +8,30 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xtls/xray-core/app/dispatcher"
-	"github.com/xtls/xray-core/app/log"
-	"github.com/xtls/xray-core/app/proxyman"
-	_ "github.com/xtls/xray-core/app/proxyman/inbound"
-	_ "github.com/xtls/xray-core/app/proxyman/outbound"
-	"github.com/xtls/xray-core/app/router"
-	"github.com/xtls/xray-core/common"
-	clog "github.com/xtls/xray-core/common/log"
-	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/protocol"
-	"github.com/xtls/xray-core/common/serial"
-	"github.com/xtls/xray-core/common/uuid"
-	core "github.com/xtls/xray-core/core"
-	"github.com/xtls/xray-core/proxy/blackhole"
-	"github.com/xtls/xray-core/proxy/dokodemo"
-	"github.com/xtls/xray-core/proxy/freedom"
-	v2http "github.com/xtls/xray-core/proxy/http"
-	"github.com/xtls/xray-core/proxy/socks"
-	"github.com/xtls/xray-core/proxy/vmess"
-	"github.com/xtls/xray-core/proxy/vmess/inbound"
-	"github.com/xtls/xray-core/proxy/vmess/outbound"
-	"github.com/xtls/xray-core/testing/servers/tcp"
-	"github.com/xtls/xray-core/testing/servers/udp"
-	"github.com/xtls/xray-core/transport/internet"
+	"github.com/drovosek229/Xray-core/app/dispatcher"
+	"github.com/drovosek229/Xray-core/app/log"
+	"github.com/drovosek229/Xray-core/app/proxyman"
+	_ "github.com/drovosek229/Xray-core/app/proxyman/inbound"
+	_ "github.com/drovosek229/Xray-core/app/proxyman/outbound"
+	"github.com/drovosek229/Xray-core/app/router"
+	"github.com/drovosek229/Xray-core/common"
+	clog "github.com/drovosek229/Xray-core/common/log"
+	"github.com/drovosek229/Xray-core/common/net"
+	"github.com/drovosek229/Xray-core/common/protocol"
+	"github.com/drovosek229/Xray-core/common/serial"
+	"github.com/drovosek229/Xray-core/common/uuid"
+	core "github.com/drovosek229/Xray-core/core"
+	"github.com/drovosek229/Xray-core/proxy/blackhole"
+	"github.com/drovosek229/Xray-core/proxy/dokodemo"
+	"github.com/drovosek229/Xray-core/proxy/freedom"
+	v2http "github.com/drovosek229/Xray-core/proxy/http"
+	"github.com/drovosek229/Xray-core/proxy/socks"
+	"github.com/drovosek229/Xray-core/proxy/vmess"
+	"github.com/drovosek229/Xray-core/proxy/vmess/inbound"
+	"github.com/drovosek229/Xray-core/proxy/vmess/outbound"
+	"github.com/drovosek229/Xray-core/testing/servers/tcp"
+	"github.com/drovosek229/Xray-core/testing/servers/udp"
+	"github.com/drovosek229/Xray-core/transport/internet"
 	xproxy "golang.org/x/net/proxy"
 )
 
@@ -173,7 +173,7 @@ func TestProxy(t *testing.T) {
 					Receiver: &protocol.ServerEndpoint{
 						Address: net.NewIPOrDomain(net.LocalHostIP),
 						Port:    uint32(serverPort),
-						User:    &protocol.User{
+						User: &protocol.User{
 							Account: serial.ToTypedMessage(&vmess.Account{
 								Id: serverUserID.String(),
 							}),
@@ -192,7 +192,7 @@ func TestProxy(t *testing.T) {
 					Receiver: &protocol.ServerEndpoint{
 						Address: net.NewIPOrDomain(net.LocalHostIP),
 						Port:    uint32(proxyPort),
-						User:    &protocol.User{
+						User: &protocol.User{
 							Account: serial.ToTypedMessage(&vmess.Account{
 								Id: proxyUserID.String(),
 							}),
@@ -303,7 +303,7 @@ func TestProxyOverKCP(t *testing.T) {
 					Receiver: &protocol.ServerEndpoint{
 						Address: net.NewIPOrDomain(net.LocalHostIP),
 						Port:    uint32(serverPort),
-						User:    &protocol.User{
+						User: &protocol.User{
 							Account: serial.ToTypedMessage(&vmess.Account{
 								Id: serverUserID.String(),
 							}),
@@ -325,7 +325,7 @@ func TestProxyOverKCP(t *testing.T) {
 					Receiver: &protocol.ServerEndpoint{
 						Address: net.NewIPOrDomain(net.LocalHostIP),
 						Port:    uint32(proxyPort),
-						User:    &protocol.User{
+						User: &protocol.User{
 							Account: serial.ToTypedMessage(&vmess.Account{
 								Id: proxyUserID.String(),
 							}),

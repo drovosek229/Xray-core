@@ -6,13 +6,13 @@ import (
 	"io"
 	"time"
 
-	"github.com/xtls/xray-core/app/proxyman"
-	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/buf"
-	"github.com/xtls/xray-core/common/errors"
-	"github.com/xtls/xray-core/common/session"
-	"github.com/xtls/xray-core/features/outbound"
-	"github.com/xtls/xray-core/transport"
+	"github.com/drovosek229/Xray-core/app/proxyman"
+	"github.com/drovosek229/Xray-core/common"
+	"github.com/drovosek229/Xray-core/common/buf"
+	"github.com/drovosek229/Xray-core/common/errors"
+	"github.com/drovosek229/Xray-core/common/session"
+	"github.com/drovosek229/Xray-core/features/outbound"
+	"github.com/drovosek229/Xray-core/transport"
 )
 
 const requestReplayLimitBytes int64 = 128 * 1024

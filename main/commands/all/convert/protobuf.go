@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/xtls/xray-core/common/cmdarg"
-	creflect "github.com/xtls/xray-core/common/reflect"
-	"github.com/xtls/xray-core/core"
-	"github.com/xtls/xray-core/main/commands/base"
+	"github.com/drovosek229/Xray-core/common/cmdarg"
+	creflect "github.com/drovosek229/Xray-core/common/reflect"
+	"github.com/drovosek229/Xray-core/core"
+	"github.com/drovosek229/Xray-core/main/commands/base"
 
 	"google.golang.org/protobuf/proto"
 )
@@ -60,7 +60,7 @@ func executeConvertConfigsToProtobuf(cmd *base.Command, args []string) {
 	}
 
 	if len(optFile) > 0 {
-		switch core.GetFormat(optFile){
+		switch core.GetFormat(optFile) {
 		case "protobuf", "":
 			fmt.Println("Output ProtoBuf file is ", optFile)
 		default:

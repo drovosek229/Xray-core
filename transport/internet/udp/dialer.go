@@ -4,12 +4,12 @@ import (
 	"context"
 	reflect "reflect"
 
-	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/errors"
-	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/net/cnc"
-	"github.com/xtls/xray-core/transport/internet"
-	"github.com/xtls/xray-core/transport/internet/stat"
+	"github.com/drovosek229/Xray-core/common"
+	"github.com/drovosek229/Xray-core/common/errors"
+	"github.com/drovosek229/Xray-core/common/net"
+	"github.com/drovosek229/Xray-core/common/net/cnc"
+	"github.com/drovosek229/Xray-core/transport/internet"
+	"github.com/drovosek229/Xray-core/transport/internet/stat"
 )
 
 func init() {

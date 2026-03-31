@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xtls/xray-core/app/observatory"
-	"github.com/xtls/xray-core/features/extension"
+	"github.com/drovosek229/Xray-core/app/observatory"
+	"github.com/drovosek229/Xray-core/features/extension"
 	"google.golang.org/protobuf/proto"
 )
 

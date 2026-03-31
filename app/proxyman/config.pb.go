@@ -7,9 +7,9 @@
 package proxyman
 
 import (
-	net "github.com/xtls/xray-core/common/net"
-	serial "github.com/xtls/xray-core/common/serial"
-	internet "github.com/xtls/xray-core/transport/internet"
+	net "github.com/drovosek229/Xray-core/common/net"
+	serial "github.com/drovosek229/Xray-core/common/serial"
+	internet "github.com/drovosek229/Xray-core/transport/internet"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -566,8 +566,8 @@ const file_app_proxyman_config_proto_rawDesc = "" +
 	"\x0fxudpProxyUDP443\x18\x04 \x01(\tR\x0fxudpProxyUDP443*C\n" +
 	"\x11RetryReplayPolicy\x12\x12\n" +
 	"\x0eZERO_BYTE_ONLY\x10\x00\x12\x1a\n" +
-	"\x16LEGACY_CONSUMED_BENIGN\x10\x01BU\n" +
-	"\x15com.xray.app.proxymanP\x01Z&github.com/xtls/xray-core/app/proxyman\xaa\x02\x11Xray.App.Proxymanb\x06proto3"
+	"\x16LEGACY_CONSUMED_BENIGN\x10\x01B\\\n" +
+	"\x15com.xray.app.proxymanP\x01Z-github.com/drovosek229/Xray-core/app/proxyman\xaa\x02\x11Xray.App.Proxymanb\x06proto3"
 
 var (
 	file_app_proxyman_config_proto_rawDescOnce sync.Once

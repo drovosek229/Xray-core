@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xtls/xray-core/app/observatory"
-	feature_outbound "github.com/xtls/xray-core/features/outbound"
+	"github.com/drovosek229/Xray-core/app/observatory"
+	feature_outbound "github.com/drovosek229/Xray-core/features/outbound"
 )
 
 type testHandlerSelectorManager struct {

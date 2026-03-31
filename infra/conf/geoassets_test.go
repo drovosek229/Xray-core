@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	approver "github.com/xtls/xray-core/app/router"
-	xraynet "github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/platform"
+	approver "github.com/drovosek229/Xray-core/app/router"
+	xraynet "github.com/drovosek229/Xray-core/common/net"
+	"github.com/drovosek229/Xray-core/common/platform"
 	"google.golang.org/protobuf/proto"
 )
 

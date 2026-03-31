@@ -15,16 +15,16 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/drovosek229/Xray-core/common/crypto"
+	dns2 "github.com/drovosek229/Xray-core/features/dns"
 	utls "github.com/refraction-networking/utls"
-	"github.com/xtls/xray-core/common/crypto"
-	dns2 "github.com/xtls/xray-core/features/dns"
 	"golang.org/x/net/http2"
 
+	"github.com/drovosek229/Xray-core/common/errors"
+	"github.com/drovosek229/Xray-core/common/net"
+	"github.com/drovosek229/Xray-core/common/utils"
+	"github.com/drovosek229/Xray-core/transport/internet"
 	"github.com/miekg/dns"
-	"github.com/xtls/xray-core/common/errors"
-	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/utils"
-	"github.com/xtls/xray-core/transport/internet"
 	"golang.org/x/crypto/cryptobyte"
 )
 

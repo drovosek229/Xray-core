@@ -8,10 +8,10 @@ import (
 	"time"
 	_ "unsafe"
 
-	"github.com/xtls/xray-core/app/router"
-	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/serial"
-	. "github.com/xtls/xray-core/infra/conf"
+	"github.com/drovosek229/Xray-core/app/router"
+	"github.com/drovosek229/Xray-core/common/net"
+	"github.com/drovosek229/Xray-core/common/serial"
+	. "github.com/drovosek229/Xray-core/infra/conf"
 	"google.golang.org/protobuf/proto"
 )
 

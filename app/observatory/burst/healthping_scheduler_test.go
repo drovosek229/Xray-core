@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xtls/xray-core/app/observatory"
+	"github.com/drovosek229/Xray-core/app/observatory"
 )
 
 func TestStartSchedulerRunsInitialCheckOnlyOnceBeforeFirstTick(t *testing.T) {

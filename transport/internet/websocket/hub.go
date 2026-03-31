@@ -11,13 +11,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/drovosek229/Xray-core/common"
+	"github.com/drovosek229/Xray-core/common/errors"
+	"github.com/drovosek229/Xray-core/common/net"
+	http_proto "github.com/drovosek229/Xray-core/common/protocol/http"
+	"github.com/drovosek229/Xray-core/transport/internet"
+	v2tls "github.com/drovosek229/Xray-core/transport/internet/tls"
 	"github.com/gorilla/websocket"
-	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/errors"
-	"github.com/xtls/xray-core/common/net"
-	http_proto "github.com/xtls/xray-core/common/protocol/http"
-	"github.com/xtls/xray-core/transport/internet"
-	v2tls "github.com/xtls/xray-core/transport/internet/tls"
 )
 
 type requestHandler struct {

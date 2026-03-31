@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xtls/xray-core/common/serial"
-	"github.com/xtls/xray-core/common/session"
-	"github.com/xtls/xray-core/features/outbound"
-	"github.com/xtls/xray-core/transport"
+	"github.com/drovosek229/Xray-core/common/serial"
+	"github.com/drovosek229/Xray-core/common/session"
+	"github.com/drovosek229/Xray-core/features/outbound"
+	"github.com/drovosek229/Xray-core/transport"
 )
 
 type testOutboundManager struct {

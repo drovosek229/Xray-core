@@ -3,12 +3,12 @@ package shadowsocks_test
 import (
 	"testing"
 
+	"github.com/drovosek229/Xray-core/common"
+	"github.com/drovosek229/Xray-core/common/buf"
+	"github.com/drovosek229/Xray-core/common/net"
+	"github.com/drovosek229/Xray-core/common/protocol"
+	. "github.com/drovosek229/Xray-core/proxy/shadowsocks"
 	"github.com/google/go-cmp/cmp"
-	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/buf"
-	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/protocol"
-	. "github.com/xtls/xray-core/proxy/shadowsocks"
 )
 
 func toAccount(a *Account) protocol.Account {

@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/drovosek229/Xray-core/app/router"
+	"github.com/drovosek229/Xray-core/common/platform/filesystem"
 	"github.com/stretchr/testify/require"
-	"github.com/xtls/xray-core/app/router"
-	"github.com/xtls/xray-core/common/platform/filesystem"
 )
 
 func TestDomainMatcherSerialization(t *testing.T) {

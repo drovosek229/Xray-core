@@ -249,8 +249,8 @@ const file_app_observatory_burst_config_proto_rawDesc = "" +
 	"\x14RuntimeFailureConfig\x12!\n" +
 	"\fbase_backoff\x18\x01 \x01(\x03R\vbaseBackoff\x12\x1f\n" +
 	"\vmax_backoff\x18\x02 \x01(\x03R\n" +
-	"maxBackoffBp\n" +
-	"\x1ecom.xray.app.observatory.burstP\x01Z/github.com/xtls/xray-core/app/observatory/burst\xaa\x02\x1aXray.App.Observatory.Burstb\x06proto3"
+	"maxBackoffBw\n" +
+	"\x1ecom.xray.app.observatory.burstP\x01Z6github.com/drovosek229/Xray-core/app/observatory/burst\xaa\x02\x1aXray.App.Observatory.Burstb\x06proto3"
 
 var (
 	file_app_observatory_burst_config_proto_rawDescOnce sync.Once

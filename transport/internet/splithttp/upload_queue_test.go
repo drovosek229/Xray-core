@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xtls/xray-core/common"
-	. "github.com/xtls/xray-core/transport/internet/splithttp"
+	"github.com/drovosek229/Xray-core/common"
+	. "github.com/drovosek229/Xray-core/transport/internet/splithttp"
 )
 
 func Test_regression_readzero(t *testing.T) {

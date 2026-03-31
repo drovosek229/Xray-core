@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
-	"github.com/xtls/xray-core/main/commands/base"
+	"github.com/drovosek229/Xray-core/main/commands/base"
 )
 
 var cmdMLDSA65 = &base.Command{

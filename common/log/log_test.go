@@ -3,9 +3,9 @@ package log_test
 import (
 	"testing"
 
+	"github.com/drovosek229/Xray-core/common/log"
+	"github.com/drovosek229/Xray-core/common/net"
 	"github.com/google/go-cmp/cmp"
-	"github.com/xtls/xray-core/common/log"
-	"github.com/xtls/xray-core/common/net"
 )
 
 type testLogger struct {

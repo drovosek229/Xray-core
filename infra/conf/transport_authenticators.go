@@ -3,10 +3,10 @@ package conf
 import (
 	"sort"
 
-	"github.com/xtls/xray-core/common/errors"
-	"github.com/xtls/xray-core/common/utils"
-	"github.com/xtls/xray-core/transport/internet/headers/http"
-	"github.com/xtls/xray-core/transport/internet/headers/noop"
+	"github.com/drovosek229/Xray-core/common/errors"
+	"github.com/drovosek229/Xray-core/common/utils"
+	"github.com/drovosek229/Xray-core/transport/internet/headers/http"
+	"github.com/drovosek229/Xray-core/transport/internet/headers/noop"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -45,31 +45,31 @@ func (v *AuthenticatorRequest) Build() (*http.RequestConfig, error) {
 				Value: []string{utils.ChromeUA},
 			},
 			{
-				Name: "Sec-CH-UA",
+				Name:  "Sec-CH-UA",
 				Value: []string{utils.ChromeUACH},
 			},
 			{
-				Name: "Sec-CH-UA-Mobile",
+				Name:  "Sec-CH-UA-Mobile",
 				Value: []string{"?0"},
 			},
 			{
-				Name: "Sec-CH-UA-Platform",
+				Name:  "Sec-CH-UA-Platform",
 				Value: []string{"Windows"},
 			},
 			{
-				Name: "Sec-Fetch-Mode",
+				Name:  "Sec-Fetch-Mode",
 				Value: []string{"no-cors", "cors", "same-origin"},
 			},
 			{
-				Name: "Sec-Fetch-Dest",
+				Name:  "Sec-Fetch-Dest",
 				Value: []string{"empty"},
 			},
 			{
-				Name: "Sec-Fetch-Site",
+				Name:  "Sec-Fetch-Site",
 				Value: []string{"none"},
 			},
 			{
-				Name: "Sec-Fetch-User",
+				Name:  "Sec-Fetch-User",
 				Value: []string{"?1"},
 			},
 			{

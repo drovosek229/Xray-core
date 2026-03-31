@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"net"
 
-	"github.com/xtls/xray-core/common/crypto"
-	"github.com/xtls/xray-core/common/errors"
+	"github.com/drovosek229/Xray-core/common/crypto"
+	"github.com/drovosek229/Xray-core/common/errors"
 )
 
 type udpCustomClient struct {

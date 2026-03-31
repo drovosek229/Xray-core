@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xtls/xray-core/app/router"
-	"github.com/xtls/xray-core/infra/conf/cfgcommon/duration"
+	"github.com/drovosek229/Xray-core/app/router"
+	"github.com/drovosek229/Xray-core/infra/conf/cfgcommon/duration"
 )
 
 func TestStrategyLeastLoadConfigBuildSetsNewSmoothingFields(t *testing.T) {

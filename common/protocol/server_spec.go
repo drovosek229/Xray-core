@@ -1,12 +1,12 @@
 package protocol
 
 import (
-	"github.com/xtls/xray-core/common/net"
+	"github.com/drovosek229/Xray-core/common/net"
 )
 
 type ServerSpec struct {
-	Destination  net.Destination
-	User         *MemoryUser
+	Destination net.Destination
+	User        *MemoryUser
 }
 
 func NewServerSpec(dest net.Destination, user *MemoryUser) *ServerSpec {

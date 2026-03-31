@@ -6,11 +6,11 @@ import (
 	"net"
 	"strings"
 
-	"github.com/xtls/xray-core/common/errors"
-	v2net "github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/protocol"
-	"github.com/xtls/xray-core/proxy/freedom"
-	"github.com/xtls/xray-core/transport/internet"
+	"github.com/drovosek229/Xray-core/common/errors"
+	v2net "github.com/drovosek229/Xray-core/common/net"
+	"github.com/drovosek229/Xray-core/common/protocol"
+	"github.com/drovosek229/Xray-core/proxy/freedom"
+	"github.com/drovosek229/Xray-core/transport/internet"
 	"google.golang.org/protobuf/proto"
 )
 

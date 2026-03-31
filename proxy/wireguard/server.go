@@ -3,18 +3,18 @@ package wireguard
 import (
 	"context"
 
-	"github.com/xtls/xray-core/common/buf"
-	c "github.com/xtls/xray-core/common/ctx"
-	"github.com/xtls/xray-core/common/errors"
-	"github.com/xtls/xray-core/common/log"
-	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/session"
-	"github.com/xtls/xray-core/core"
-	"github.com/xtls/xray-core/features/dns"
-	"github.com/xtls/xray-core/features/policy"
-	"github.com/xtls/xray-core/features/routing"
-	"github.com/xtls/xray-core/transport"
-	"github.com/xtls/xray-core/transport/internet/stat"
+	"github.com/drovosek229/Xray-core/common/buf"
+	c "github.com/drovosek229/Xray-core/common/ctx"
+	"github.com/drovosek229/Xray-core/common/errors"
+	"github.com/drovosek229/Xray-core/common/log"
+	"github.com/drovosek229/Xray-core/common/net"
+	"github.com/drovosek229/Xray-core/common/session"
+	"github.com/drovosek229/Xray-core/core"
+	"github.com/drovosek229/Xray-core/features/dns"
+	"github.com/drovosek229/Xray-core/features/policy"
+	"github.com/drovosek229/Xray-core/features/routing"
+	"github.com/drovosek229/Xray-core/transport"
+	"github.com/drovosek229/Xray-core/transport/internet/stat"
 )
 
 var nullDestination = net.TCPDestination(net.AnyIP, 0)

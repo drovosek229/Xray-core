@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/xtls/xray-core/app/observatory"
+	"github.com/drovosek229/Xray-core/app/observatory"
 )
 
 func TestLeastPingPrefersLowestObservedAlive(t *testing.T) {

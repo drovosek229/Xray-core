@@ -139,7 +139,7 @@ jobs:
             -trimpath \
             -buildvcs=false \
             -gcflags="all=-l=4" \
-            -ldflags="-X github.com/xtls/xray-core/core.build=${BUILD_COMMIT} -X github.com/xtls/xray-core/core.releaseTag=${RELEASE_TAG} -s -w -buildid=" \
+            -ldflags="-X github.com/drovosek229/Xray-core/core.build=${BUILD_COMMIT} -X github.com/drovosek229/Xray-core/core.releaseTag=${RELEASE_TAG} -s -w -buildid=" \
             -v ./main
 
       - name: Assemble package

@@ -7,7 +7,7 @@ import (
 	"net/netip"
 	"strings"
 
-	"github.com/xtls/xray-core/common"
+	"github.com/drovosek229/Xray-core/common"
 )
 
 func init() {

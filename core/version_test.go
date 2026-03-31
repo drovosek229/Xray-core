@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	core "github.com/xtls/xray-core/core"
+	core "github.com/drovosek229/Xray-core/core"
 )
 
 func TestForkVersioning(t *testing.T) {

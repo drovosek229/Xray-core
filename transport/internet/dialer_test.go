@@ -4,11 +4,11 @@ import (
 	"context"
 	"testing"
 
+	"github.com/drovosek229/Xray-core/common"
+	"github.com/drovosek229/Xray-core/common/net"
+	"github.com/drovosek229/Xray-core/testing/servers/tcp"
+	. "github.com/drovosek229/Xray-core/transport/internet"
 	"github.com/google/go-cmp/cmp"
-	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/testing/servers/tcp"
-	. "github.com/xtls/xray-core/transport/internet"
 )
 
 func TestDialWithLocalAddr(t *testing.T) {

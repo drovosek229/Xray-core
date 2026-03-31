@@ -5,7 +5,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/xtls/xray-core/common/ctx"
+	"github.com/drovosek229/Xray-core/common/ctx"
 )
 
 const balancerRetryStateKey ctx.SessionKey = 13

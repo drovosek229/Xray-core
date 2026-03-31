@@ -3,10 +3,10 @@ package conf
 import (
 	"encoding/json"
 
-	"github.com/xtls/xray-core/common/errors"
-	"github.com/xtls/xray-core/common/protocol"
-	"github.com/xtls/xray-core/common/serial"
-	"github.com/xtls/xray-core/proxy/http"
+	"github.com/drovosek229/Xray-core/common/errors"
+	"github.com/drovosek229/Xray-core/common/protocol"
+	"github.com/drovosek229/Xray-core/common/serial"
+	"github.com/drovosek229/Xray-core/proxy/http"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -51,8 +51,8 @@ type HTTPRemoteConfig struct {
 }
 
 type HTTPClientConfig struct {
-	Address  *Address          	 `json:"address"`
-	Port     uint16            	 `json:"port"`
+	Address  *Address            `json:"address"`
+	Port     uint16              `json:"port"`
 	Level    uint32              `json:"level"`
 	Email    string              `json:"email"`
 	Username string              `json:"user"`

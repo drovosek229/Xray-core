@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xtls/xray-core/common/crypto"
+	"github.com/drovosek229/Xray-core/common/crypto"
 )
 
 const (

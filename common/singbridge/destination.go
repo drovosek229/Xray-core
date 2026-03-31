@@ -1,9 +1,9 @@
 package singbridge
 
 import (
+	"github.com/drovosek229/Xray-core/common/net"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
-	"github.com/xtls/xray-core/common/net"
 )
 
 func ToNetwork(network string) net.Network {

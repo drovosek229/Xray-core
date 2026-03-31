@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xtls/xray-core/app/observatory"
-	"github.com/xtls/xray-core/common/signal/done"
-	feature_outbound "github.com/xtls/xray-core/features/outbound"
+	"github.com/drovosek229/Xray-core/app/observatory"
+	"github.com/drovosek229/Xray-core/common/signal/done"
+	feature_outbound "github.com/drovosek229/Xray-core/features/outbound"
 )
 
 func TestLiveFailureOverlayMarksOutboundDeadImmediately(t *testing.T) {

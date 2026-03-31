@@ -15,7 +15,7 @@ import (
 	"runtime"
 	"runtime/debug"
 
-	"github.com/xtls/xray-core/common/serial"
+	"github.com/drovosek229/Xray-core/common/serial"
 )
 
 var (

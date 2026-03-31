@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xtls/xray-core/app/observatory/burst"
-	"github.com/xtls/xray-core/infra/conf/cfgcommon/duration"
+	"github.com/drovosek229/Xray-core/app/observatory/burst"
+	"github.com/drovosek229/Xray-core/infra/conf/cfgcommon/duration"
 )
 
 func TestBurstObservatoryConfigBuildNormalizesRuntimeFailure(t *testing.T) {

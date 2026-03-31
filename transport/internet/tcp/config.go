@@ -1,8 +1,8 @@
 package tcp
 
 import (
-	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/transport/internet"
+	"github.com/drovosek229/Xray-core/common"
+	"github.com/drovosek229/Xray-core/transport/internet"
 )
 
 func init() {

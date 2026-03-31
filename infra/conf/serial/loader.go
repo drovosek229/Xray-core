@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"io"
 
+	"github.com/drovosek229/Xray-core/common/errors"
+	"github.com/drovosek229/Xray-core/core"
+	"github.com/drovosek229/Xray-core/infra/conf"
+	json_reader "github.com/drovosek229/Xray-core/infra/conf/json"
 	"github.com/ghodss/yaml"
 	"github.com/pelletier/go-toml"
-	"github.com/xtls/xray-core/common/errors"
-	"github.com/xtls/xray-core/core"
-	"github.com/xtls/xray-core/infra/conf"
-	json_reader "github.com/xtls/xray-core/infra/conf/json"
 )
 
 type offset struct {

@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/drovosek229/Xray-core/app/dns"
+	"github.com/drovosek229/Xray-core/common"
+	"github.com/drovosek229/Xray-core/common/net"
+	dns_feature "github.com/drovosek229/Xray-core/features/dns"
 	"github.com/google/go-cmp/cmp"
-	. "github.com/xtls/xray-core/app/dns"
-	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/net"
-	dns_feature "github.com/xtls/xray-core/features/dns"
 )
 
 func TestTCPLocalNameServer(t *testing.T) {
