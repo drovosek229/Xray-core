@@ -190,7 +190,8 @@ func TestBurstObservatoryDialerProxyFailover(t *testing.T) {
 				Tag: "outer",
 				ProxySettings: serial.ToTypedMessage(&freedom.Config{}),
 				SenderSettings: serial.ToTypedMessage(&proxyman.SenderConfig{
-					ProxySettings: &internet.ProxyConfig{Tag: "proxy-balancer"},
+					ProxySettings:     &internet.ProxyConfig{Tag: "proxy-balancer"},
+					RetryReplayPolicy: proxyman.RetryReplayPolicy_LEGACY_CONSUMED_BENIGN,
 				}),
 			},
 			newVMessOutbound("proxy-a", serverAPort, serverUserID),
@@ -282,6 +283,9 @@ func newBurstProxyServerConfig(listenPort net.Port, userID *protocol.ID, request
 func newVMessOutbound(tag string, port net.Port, userID *protocol.ID) *core.OutboundHandlerConfig {
 	return &core.OutboundHandlerConfig{
 		Tag: tag,
+		SenderSettings: serial.ToTypedMessage(&proxyman.SenderConfig{
+			RetryReplayPolicy: proxyman.RetryReplayPolicy_LEGACY_CONSUMED_BENIGN,
+		}),
 		ProxySettings: serial.ToTypedMessage(&vmessoutbound.Config{
 			Receiver: &protocol.ServerEndpoint{
 				Address: net.NewIPOrDomain(net.LocalHostIP),
