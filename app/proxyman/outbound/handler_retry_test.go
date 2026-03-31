@@ -447,7 +447,7 @@ func TestHandlerDoesNotRetryRouteBalancerOnConsumedContextCanceledByDefault(t *t
 	}
 }
 
-func TestHandlerRetriesRouteBalancerOnConsumedContextCanceledWithLegacyPolicy(t *testing.T) {
+func TestHandlerDoesNotRetryRouteBalancerOnConsumedContextCanceledWithLegacyPolicy(t *testing.T) {
 	manager := &retryTestOutboundManager{handlers: map[string]feature_outbound.Handler{}}
 	selector := &retryTestBalancerSelector{
 		choices: map[string][]string{
@@ -495,14 +495,14 @@ func TestHandlerRetriesRouteBalancerOnConsumedContextCanceledWithLegacyPolicy(t 
 
 	handlerA.Dispatch(ctx, link)
 
-	if proxyB.calls != 1 {
-		t.Fatalf("expected retry on consumed context cancellation with legacy policy, got %d retries", proxyB.calls)
+	if proxyB.calls != 0 {
+		t.Fatalf("expected no retry on consumed context cancellation with legacy policy, got %d retries", proxyB.calls)
 	}
 	if !bytes.Equal(proxyAPayload, requestPayload) {
 		t.Fatalf("expected proxy-a to receive original payload, got %q", proxyAPayload)
 	}
-	if !bytes.Equal(proxyBPayload, requestPayload) {
-		t.Fatalf("expected proxy-b to receive replayed payload, got %q", proxyBPayload)
+	if len(proxyBPayload) != 0 {
+		t.Fatalf("expected no replayed payload with legacy policy, got %q", proxyBPayload)
 	}
 }
 
@@ -812,7 +812,7 @@ func TestHandlerDoesNotRetryDialerProxyBalancerAfterConsumedRequestByDefault(t *
 	}
 }
 
-func TestHandlerRetriesDialerProxyBalancerAfterConsumedRequestWithLegacyPolicy(t *testing.T) {
+func TestHandlerDoesNotRetryDialerProxyBalancerAfterConsumedRequestCanceledWithLegacyPolicy(t *testing.T) {
 	manager := &retryTestOutboundManager{handlers: map[string]feature_outbound.Handler{}}
 	selector := &retryTestBalancerSelector{
 		choices: map[string][]string{
@@ -863,8 +863,76 @@ func TestHandlerRetriesDialerProxyBalancerAfterConsumedRequestWithLegacyPolicy(t
 
 	outerHandler.Dispatch(ctx, link)
 
+	if outer.calls != 1 {
+		t.Fatalf("expected outer outbound to run once on consumed context cancellation with legacy policy, got %d", outer.calls)
+	}
+	if len(payloads) != 1 {
+		t.Fatalf("expected payload to be consumed once, got %d reads", len(payloads))
+	}
+	if !bytes.Equal(payloads[0], requestPayload) {
+		t.Fatalf("expected original payload on the single attempt, got %q", payloads[0])
+	}
+	if len(selector.excludingCalls) != 1 {
+		t.Fatalf("expected balancer to be queried once, got %d calls", len(selector.excludingCalls))
+	}
+	if len(selector.excludingCalls[0]) != 0 {
+		t.Fatalf("expected first balancer selection to have no exclusions, got %v", selector.excludingCalls[0])
+	}
+}
+
+func TestHandlerRetriesDialerProxyBalancerAfterConsumedEOFWithLegacyPolicy(t *testing.T) {
+	manager := &retryTestOutboundManager{handlers: map[string]feature_outbound.Handler{}}
+	selector := &retryTestBalancerSelector{
+		choices: map[string][]string{
+			"proxy-balancer": {"proxy-a", "proxy-b"},
+		},
+	}
+
+	innerA := &retryTestProxy{process: func(context.Context, *transport.Link, internet.Dialer) error {
+		return nil
+	}}
+	innerB := &retryTestProxy{process: func(context.Context, *transport.Link, internet.Dialer) error {
+		return nil
+	}}
+
+	var payloads [][]byte
+	var outer *retryTestProxy
+	outer = &retryTestProxy{process: func(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
+		payloads = append(payloads, readAllRetryTestPayload(t, link.Reader))
+		conn, err := dialer.Dial(ctx, net.TCPDestination(net.DomainAddress("example.com"), 80))
+		if err != nil {
+			return err
+		}
+		conn.Close()
+		if outer.calls == 1 {
+			return io.EOF
+		}
+		return nil
+	}}
+
+	manager.handlers["proxy-a"] = &Handler{tag: "proxy-a", proxy: innerA, outboundManager: manager}
+	manager.handlers["proxy-b"] = &Handler{tag: "proxy-b", proxy: innerB, outboundManager: manager}
+	outerHandler := &Handler{
+		tag:                "outer",
+		proxy:              outer,
+		outboundManager:    manager,
+		balancerSelector:   selector,
+		balancerSelectorEx: selector,
+		senderSettings:     newRetryTestSenderConfig("proxy-balancer", proxyman.RetryReplayPolicy_LEGACY_CONSUMED_BENIGN),
+	}
+	manager.handlers["outer"] = outerHandler
+
+	requestPayload := []byte("payload")
+	ctx := newRetryTestContext()
+	link := &transport.Link{
+		Reader: buf.NewReader(bytes.NewReader(requestPayload)),
+		Writer: buf.NewWriter(io.Discard),
+	}
+
+	outerHandler.Dispatch(ctx, link)
+
 	if outer.calls != 2 {
-		t.Fatalf("expected outer outbound to run twice with legacy policy, got %d", outer.calls)
+		t.Fatalf("expected outer outbound to run twice with legacy EOF policy, got %d", outer.calls)
 	}
 	if len(payloads) != 2 {
 		t.Fatalf("expected payload to be consumed twice, got %d reads", len(payloads))

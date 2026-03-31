@@ -258,8 +258,11 @@ func (h *Handler) classifyBalancerFailure(ctx context.Context, err error, reques
 		return balancerFailureClassificationZeroByteReplay
 	}
 
+	// Context cancellation is too ambiguous for consumed-request replay:
+	// browser aborts and wallet flows can surface it without implying the
+	// upstream request is safe to duplicate on another outbound.
 	if h.retryReplayPolicy() == proxyman.RetryReplayPolicy_LEGACY_CONSUMED_BENIGN &&
-		(goerrors.Is(err, io.EOF) || goerrors.Is(err, context.Canceled)) {
+		goerrors.Is(err, io.EOF) {
 		return balancerFailureClassificationLegacyConsumedReplay
 	}
 
