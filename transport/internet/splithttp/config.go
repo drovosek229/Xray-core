@@ -132,6 +132,18 @@ func (c *Config) GetNormalizedUplinkHTTPMethod() string {
 
 func (c *Config) GetNormalizedScMaxEachPostBytes() RangeConfig {
 	if c.ScMaxEachPostBytes == nil || c.ScMaxEachPostBytes.To == 0 {
+		switch c.GetNormalizedUplinkDataPlacement() {
+		case PlacementHeader, PlacementCookie:
+			if cap, err := c.GetPacketUpHeaderBudgetCap(); err == nil {
+				if cap < 1 {
+					cap = 1
+				}
+				return RangeConfig{
+					From: cap,
+					To:   cap,
+				}
+			}
+		}
 		if c.IsBalancedBehaviorProfile() {
 			return RangeConfig{
 				From: 128 * 1024,

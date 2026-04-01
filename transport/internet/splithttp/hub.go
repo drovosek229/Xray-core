@@ -364,8 +364,6 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 				break
 			}
 		}
-	} else {
-		forwardedAddrs = http_proto.ParseXForwardedFor(request.Header)
 	}
 	var remoteAddr net.Addr
 	var err error

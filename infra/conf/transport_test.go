@@ -215,3 +215,109 @@ func TestSplitHTTPXmuxWarmConnectionsBuild(t *testing.T) {
 		t.Fatalf("expected xmux warmConnections=2, got %d", built.Xmux.GetWarmConnections())
 	}
 }
+
+func TestSplitHTTPGetPacketUpPlacementValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		placement string
+		wantErr   bool
+	}{
+		{
+			name:      "header-accepted",
+			placement: splithttp.PlacementHeader,
+		},
+		{
+			name:      "cookie-accepted",
+			placement: splithttp.PlacementCookie,
+		},
+		{
+			name:      "body-rejected",
+			placement: splithttp.PlacementBody,
+			wantErr:   true,
+		},
+		{
+			name:      "auto-rejected",
+			placement: splithttp.PlacementAuto,
+			wantErr:   true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := (&SplitHTTPConfig{
+				Path:                "/xhttp",
+				Mode:                "packet-up",
+				UplinkHTTPMethod:    "GET",
+				UplinkDataPlacement: test.placement,
+			}).Build()
+			if test.wantErr && err == nil {
+				t.Fatal("expected config validation error")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("unexpected config validation error: %v", err)
+			}
+		})
+	}
+}
+
+func TestSplitHTTPScMaxEachPostBytesRejectsInvalidValue(t *testing.T) {
+	_, err := (&SplitHTTPConfig{
+		Path:               "/xhttp",
+		ScMaxEachPostBytes: Int32Range{From: -1, To: -1},
+	}).Build()
+	if err == nil {
+		t.Fatal("expected invalid scMaxEachPostBytes to be rejected")
+	}
+}
+
+func TestSplitHTTPHeaderBudgetDefaultsAndRejectsOversize(t *testing.T) {
+	tests := []struct {
+		name      string
+		placement string
+	}{
+		{
+			name:      "header",
+			placement: splithttp.PlacementHeader,
+		},
+		{
+			name:      "cookie",
+			placement: splithttp.PlacementCookie,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			message, err := (&SplitHTTPConfig{
+				Path:                "/xhttp",
+				Mode:                "packet-up",
+				UplinkDataPlacement: test.placement,
+			}).Build()
+			if err != nil {
+				t.Fatalf("unexpected build error: %v", err)
+			}
+
+			built := message.(*splithttp.Config)
+			if built.ScMaxEachPostBytes == nil || built.ScMaxEachPostBytes.GetFrom() <= 0 {
+				t.Fatalf("expected packet-up header budget default, got %+v", built.ScMaxEachPostBytes)
+			}
+
+			cap, err := built.GetPacketUpHeaderBudgetCap()
+			if err != nil {
+				t.Fatalf("failed to derive header budget cap: %v", err)
+			}
+			if built.ScMaxEachPostBytes.GetFrom() != cap || built.ScMaxEachPostBytes.GetTo() != cap {
+				t.Fatalf("expected built scMaxEachPostBytes to match derived cap %d, got %+v", cap, built.ScMaxEachPostBytes)
+			}
+
+			_, err = (&SplitHTTPConfig{
+				Path:                "/xhttp",
+				Mode:                "packet-up",
+				UplinkDataPlacement: test.placement,
+				ScMaxEachPostBytes:  Int32Range{From: cap + 1, To: cap + 1},
+			}).Build()
+			if err == nil {
+				t.Fatal("expected oversized packet-up header budget to be rejected")
+			}
+		})
+	}
+}

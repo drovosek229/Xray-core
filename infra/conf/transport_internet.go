@@ -268,6 +268,57 @@ func newRangeConfig(input Int32Range) *splithttp.RangeConfig {
 	}
 }
 
+func exactInt32Range(value int32) Int32Range {
+	return Int32Range{
+		Left:  value,
+		Right: value,
+		From:  value,
+		To:    value,
+	}
+}
+
+func (c *SplitHTTPConfig) normalizedTransportConfig() *splithttp.Config {
+	return &splithttp.Config{
+		Host:                   c.Host,
+		Path:                   c.Path,
+		Mode:                   c.Mode,
+		Headers:                c.Headers,
+		XPaddingBytes:          newRangeConfig(c.XPaddingBytes),
+		XPaddingObfsMode:       c.XPaddingObfsMode,
+		XPaddingKey:            c.XPaddingKey,
+		XPaddingHeader:         c.XPaddingHeader,
+		XPaddingPlacement:      c.XPaddingPlacement,
+		XPaddingMethod:         c.XPaddingMethod,
+		UplinkHTTPMethod:       c.UplinkHTTPMethod,
+		SessionPlacement:       c.SessionPlacement,
+		SeqPlacement:           c.SeqPlacement,
+		SessionKey:             c.SessionKey,
+		SeqKey:                 c.SeqKey,
+		UplinkDataPlacement:    c.UplinkDataPlacement,
+		UplinkDataKey:          c.UplinkDataKey,
+		UplinkChunkSize:        newRangeConfig(c.UplinkChunkSize),
+		NoGRPCHeader:           c.NoGRPCHeader,
+		NoSSEHeader:            c.NoSSEHeader,
+		BehaviorProfile:        c.BehaviorProfile,
+		ScMaxEachPostBytes:     newRangeConfig(c.ScMaxEachPostBytes),
+		ScMinPostsIntervalMs:   newRangeConfig(c.ScMinPostsIntervalMs),
+		ScMaxBufferedPosts:     c.ScMaxBufferedPosts,
+		ScStreamUpServerSecs:   newRangeConfig(c.ScStreamUpServerSecs),
+		ServerMaxHeaderBytes:   c.ServerMaxHeaderBytes,
+		SessionOpenTimeoutSecs: c.SessionOpenTimeoutSecs,
+		SessionIdleTimeoutSecs: c.SessionIdleTimeoutSecs,
+		Xmux: &splithttp.XmuxConfig{
+			MaxConcurrency:   newRangeConfig(c.Xmux.MaxConcurrency),
+			MaxConnections:   newRangeConfig(c.Xmux.MaxConnections),
+			CMaxReuseTimes:   newRangeConfig(c.Xmux.CMaxReuseTimes),
+			HMaxRequestTimes: newRangeConfig(c.Xmux.HMaxRequestTimes),
+			HMaxReusableSecs: newRangeConfig(c.Xmux.HMaxReusableSecs),
+			HKeepAlivePeriod: c.Xmux.HKeepAlivePeriod,
+			WarmConnections:  c.Xmux.WarmConnections,
+		},
+	}
+}
+
 // Build implements Buildable.
 func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 	if c.Extra != nil {
@@ -353,8 +404,14 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 	}
 	c.UplinkHTTPMethod = strings.ToUpper(c.UplinkHTTPMethod)
 
-	if c.UplinkHTTPMethod == "GET" && c.Mode != "packet-up" {
-		return nil, errors.New("uplinkHTTPMethod can be GET only in packet-up mode")
+	// GET uploads are only reliable when payload bytes are moved out of the body.
+	if c.UplinkHTTPMethod == "GET" {
+		if c.Mode != "packet-up" {
+			return nil, errors.New("uplinkHTTPMethod can be GET only in packet-up mode")
+		}
+		if c.UplinkDataPlacement != splithttp.PlacementHeader && c.UplinkDataPlacement != splithttp.PlacementCookie {
+			return nil, errors.New("uplinkHTTPMethod GET requires uplinkDataPlacement to be header or cookie")
+		}
 	}
 
 	switch c.SessionPlacement {
@@ -403,6 +460,9 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 	if c.ServerMaxHeaderBytes < 0 {
 		return nil, errors.New("invalid negative value of maxHeaderBytes")
 	}
+	if c.ScMaxEachPostBytes != (Int32Range{}) && (c.ScMaxEachPostBytes.From <= 0 || c.ScMaxEachPostBytes.To <= 0) {
+		return nil, errors.New("invalid non-positive value of scMaxEachPostBytes")
+	}
 	if c.SessionOpenTimeoutSecs < 0 {
 		return nil, errors.New("invalid negative value of sessionOpenTimeoutSecs")
 	}
@@ -422,45 +482,24 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 		c.Xmux.HMaxReusableSecs.To = 3000
 	}
 
-	config := &splithttp.Config{
-		Host:                   c.Host,
-		Path:                   c.Path,
-		Mode:                   c.Mode,
-		Headers:                c.Headers,
-		XPaddingBytes:          newRangeConfig(c.XPaddingBytes),
-		XPaddingObfsMode:       c.XPaddingObfsMode,
-		XPaddingKey:            c.XPaddingKey,
-		XPaddingHeader:         c.XPaddingHeader,
-		XPaddingPlacement:      c.XPaddingPlacement,
-		XPaddingMethod:         c.XPaddingMethod,
-		UplinkHTTPMethod:       c.UplinkHTTPMethod,
-		SessionPlacement:       c.SessionPlacement,
-		SeqPlacement:           c.SeqPlacement,
-		SessionKey:             c.SessionKey,
-		SeqKey:                 c.SeqKey,
-		UplinkDataPlacement:    c.UplinkDataPlacement,
-		UplinkDataKey:          c.UplinkDataKey,
-		UplinkChunkSize:        newRangeConfig(c.UplinkChunkSize),
-		NoGRPCHeader:           c.NoGRPCHeader,
-		NoSSEHeader:            c.NoSSEHeader,
-		BehaviorProfile:        c.BehaviorProfile,
-		ScMaxEachPostBytes:     newRangeConfig(c.ScMaxEachPostBytes),
-		ScMinPostsIntervalMs:   newRangeConfig(c.ScMinPostsIntervalMs),
-		ScMaxBufferedPosts:     c.ScMaxBufferedPosts,
-		ScStreamUpServerSecs:   newRangeConfig(c.ScStreamUpServerSecs),
-		ServerMaxHeaderBytes:   c.ServerMaxHeaderBytes,
-		SessionOpenTimeoutSecs: c.SessionOpenTimeoutSecs,
-		SessionIdleTimeoutSecs: c.SessionIdleTimeoutSecs,
-		Xmux: &splithttp.XmuxConfig{
-			MaxConcurrency:   newRangeConfig(c.Xmux.MaxConcurrency),
-			MaxConnections:   newRangeConfig(c.Xmux.MaxConnections),
-			CMaxReuseTimes:   newRangeConfig(c.Xmux.CMaxReuseTimes),
-			HMaxRequestTimes: newRangeConfig(c.Xmux.HMaxRequestTimes),
-			HMaxReusableSecs: newRangeConfig(c.Xmux.HMaxReusableSecs),
-			HKeepAlivePeriod: c.Xmux.HKeepAlivePeriod,
-			WarmConnections:  c.Xmux.WarmConnections,
-		},
+	// Header/cookie packet uploads need a bounded default that fits under the
+	// effective HTTP header budget on both client and server.
+	if c.UplinkDataPlacement == splithttp.PlacementHeader || c.UplinkDataPlacement == splithttp.PlacementCookie {
+		maxPostBytes, err := c.normalizedTransportConfig().GetPacketUpHeaderBudgetCap()
+		if err != nil {
+			return nil, errors.New("failed to derive scMaxEachPostBytes for packet-up metadata placement").Base(err)
+		}
+		if maxPostBytes < 1 {
+			return nil, errors.New("serverMaxHeaderBytes is too small for packet-up metadata placement")
+		}
+		if c.ScMaxEachPostBytes == (Int32Range{}) {
+			c.ScMaxEachPostBytes = exactInt32Range(maxPostBytes)
+		} else if c.ScMaxEachPostBytes.From > maxPostBytes || c.ScMaxEachPostBytes.To > maxPostBytes {
+			return nil, errors.New("scMaxEachPostBytes exceeds the effective packet-up header budget")
+		}
 	}
+
+	config := c.normalizedTransportConfig()
 
 	if c.DownloadSettings != nil {
 		if c.Mode == "stream-one" {

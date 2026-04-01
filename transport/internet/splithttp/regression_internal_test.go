@@ -17,6 +17,8 @@ import (
 
 	xnet "github.com/drovosek229/Xray-core/common/net"
 	"github.com/drovosek229/Xray-core/transport/internet"
+	"github.com/drovosek229/Xray-core/transport/internet/hysteria/udphop"
+	"github.com/drovosek229/Xray-core/transport/internet/stat"
 )
 
 type fakeDialerClient struct{}
@@ -35,6 +37,94 @@ func (f *fakeDialerClient) OpenStream(context.Context, string, string, io.Reader
 
 func (f *fakeDialerClient) PostPacket(context.Context, string, string, string, io.Reader, int64, *RequestBehavior) error {
 	return nil
+}
+
+type testPacketConn struct {
+	closed bool
+}
+
+func (c *testPacketConn) ReadFrom([]byte) (int, stdnet.Addr, error) {
+	return 0, &stdnet.UDPAddr{}, io.EOF
+}
+
+func (c *testPacketConn) WriteTo(b []byte, _ stdnet.Addr) (int, error) {
+	return len(b), nil
+}
+
+func (c *testPacketConn) Close() error {
+	c.closed = true
+	return nil
+}
+
+func (c *testPacketConn) LocalAddr() stdnet.Addr {
+	return &stdnet.UDPAddr{IP: stdnet.IPv4(127, 0, 0, 1), Port: 10000}
+}
+
+func (c *testPacketConn) SetDeadline(time.Time) error {
+	return nil
+}
+
+func (c *testPacketConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+
+func (c *testPacketConn) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
+type closableTestConn struct {
+	closed     bool
+	localAddr  stdnet.Addr
+	remoteAddr stdnet.Addr
+}
+
+func (c *closableTestConn) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (c *closableTestConn) Write(b []byte) (int, error) {
+	return len(b), nil
+}
+
+func (c *closableTestConn) Close() error {
+	c.closed = true
+	return nil
+}
+
+func (c *closableTestConn) LocalAddr() stdnet.Addr {
+	if c.localAddr != nil {
+		return c.localAddr
+	}
+	return &stdnet.TCPAddr{IP: stdnet.IPv4(127, 0, 0, 1), Port: 10000}
+}
+
+func (c *closableTestConn) RemoteAddr() stdnet.Addr {
+	if c.remoteAddr != nil {
+		return c.remoteAddr
+	}
+	return &stdnet.TCPAddr{IP: stdnet.IPv4(127, 0, 0, 1), Port: 10001}
+}
+
+func (c *closableTestConn) SetDeadline(time.Time) error {
+	return nil
+}
+
+func (c *closableTestConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+
+func (c *closableTestConn) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
+type invalidAddr struct{}
+
+func (invalidAddr) Network() string {
+	return "tcp"
+}
+
+func (invalidAddr) String() string {
+	return "not-a-valid-udp-address"
 }
 
 type startedReadCloserStub struct {
@@ -424,6 +514,157 @@ func TestServeHTTPRejectsPacketSeqWithoutSession(t *testing.T) {
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for packet-up without session id, got %d", recorder.Code)
+	}
+}
+
+func TestServeHTTPIgnoresUntrustedXForwardedFor(t *testing.T) {
+	config := &Config{
+		Path:          "/x",
+		XPaddingBytes: &RangeConfig{From: 1, To: 1},
+	}
+	handler := newRequestHandlerForTest(config)
+
+	var remoteAddr string
+	handler.ln.addConn = func(conn stat.Connection) {
+		remoteAddr = conn.RemoteAddr().String()
+		_ = conn.Close()
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://example.com/x/?x_padding=X", nil)
+	request.Header.Set("X-Forwarded-For", "1.1.1.1")
+	request.RemoteAddr = "203.0.113.5:3210"
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if remoteAddr != "203.0.113.5:3210" {
+		t.Fatalf("expected socket peer address to win without trust config, got %q", remoteAddr)
+	}
+}
+
+func TestServeHTTPUsesTrustedXForwardedFor(t *testing.T) {
+	config := &Config{
+		Path:          "/x",
+		XPaddingBytes: &RangeConfig{From: 1, To: 1},
+	}
+	handler := newRequestHandlerForTest(config)
+	handler.socketSettings = &internet.SocketConfig{
+		TrustedXForwardedFor: []string{"X-Forwarded-For"},
+	}
+
+	var remoteAddr string
+	handler.ln.addConn = func(conn stat.Connection) {
+		remoteAddr = conn.RemoteAddr().String()
+		_ = conn.Close()
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://example.com/x/?x_padding=X", nil)
+	request.Header.Set("X-Forwarded-For", "1.1.1.1")
+	request.RemoteAddr = "203.0.113.5:3210"
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if remoteAddr != "1.1.1.1:0" {
+		t.Fatalf("expected trusted forwarded address to be used, got %q", remoteAddr)
+	}
+}
+
+func TestPrepareHTTP3PacketConnUDPHopDialErrorDoesNotPanic(t *testing.T) {
+	packetConn := &testPacketConn{}
+	streamSettings := newTestStreamConfig(&Config{Path: "/"})
+	quicParams := &internet.QuicParams{
+		UdpHop: &internet.UdpHop{
+			Ports:       []uint32{8443, 9443},
+			IntervalMin: 5,
+			IntervalMax: 5,
+		},
+	}
+
+	callCount := 0
+	setup, err := prepareHTTP3PacketConn(
+		context.Background(),
+		xnet.UDPDestination(xnet.IPAddress(stdnet.IPv4(127, 0, 0, 1)), 443),
+		streamSettings,
+		quicParams,
+		func(context.Context, xnet.Destination, *internet.SocketConfig) (xnet.Conn, error) {
+			callCount++
+			if callCount == 1 {
+				return &internet.PacketConnWrapper{
+					PacketConn: packetConn,
+					Dest:       &stdnet.UDPAddr{IP: stdnet.IPv4(127, 0, 0, 1), Port: 443},
+				}, nil
+			}
+			return nil, stderrors.New("boom")
+		},
+	)
+	if err != nil {
+		t.Fatalf("unexpected setup error: %v", err)
+	}
+	defer setup.Close()
+
+	hopConn, ok := setup.packetConn.(*udphop.UdpHopPacketConn)
+	if !ok {
+		t.Fatalf("expected UDP hop connection, got %T", setup.packetConn)
+	}
+
+	if _, err := hopConn.ListenUDPFunc(&stdnet.UDPAddr{IP: stdnet.IPv4(127, 0, 0, 1), Port: 9443}); err == nil {
+		t.Fatal("expected hop dial failure to be returned")
+	}
+}
+
+func TestPrepareHTTP3PacketConnClosesConnOnResolveError(t *testing.T) {
+	conn := &closableTestConn{remoteAddr: invalidAddr{}}
+	streamSettings := newTestStreamConfig(&Config{Path: "/"})
+
+	_, err := prepareHTTP3PacketConn(
+		context.Background(),
+		xnet.UDPDestination(xnet.IPAddress(stdnet.IPv4(127, 0, 0, 1)), 443),
+		streamSettings,
+		&internet.QuicParams{UdpHop: &internet.UdpHop{}},
+		func(context.Context, xnet.Destination, *internet.SocketConfig) (xnet.Conn, error) {
+			return conn, nil
+		},
+	)
+	if err == nil {
+		t.Fatal("expected resolve error for invalid remote address")
+	}
+	if !conn.closed {
+		t.Fatal("expected setup failure to close the underlying connection")
+	}
+}
+
+func TestGetNormalizedScMaxEachPostBytesUsesHeaderBudgetDefaults(t *testing.T) {
+	tests := []struct {
+		name      string
+		placement string
+	}{
+		{
+			name:      "header",
+			placement: PlacementHeader,
+		},
+		{
+			name:      "cookie",
+			placement: PlacementCookie,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := &Config{
+				Path:                "/x",
+				Mode:                "packet-up",
+				UplinkDataPlacement: test.placement,
+			}
+
+			cap, err := config.GetPacketUpHeaderBudgetCap()
+			if err != nil {
+				t.Fatalf("unexpected cap error: %v", err)
+			}
+
+			got := config.GetNormalizedScMaxEachPostBytes()
+			if got.From != cap || got.To != cap {
+				t.Fatalf("expected header budget default %d, got %+v", cap, got)
+			}
+		})
 	}
 }
 
