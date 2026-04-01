@@ -211,6 +211,10 @@ func (c *Config) GetNormalizedUplinkChunkSize() RangeConfig {
 
 func (c *Config) GetNormalizedServerMaxHeaderBytes() int {
 	if c.ServerMaxHeaderBytes <= 0 {
+		switch c.GetNormalizedUplinkDataPlacement() {
+		case PlacementHeader, PlacementCookie:
+			return 16 * 1024
+		}
 		return 8192
 	} else {
 		return int(c.ServerMaxHeaderBytes)

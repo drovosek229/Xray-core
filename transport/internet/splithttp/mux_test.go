@@ -11,6 +11,10 @@ import (
 
 type fakeRoundTripper struct{}
 
+func (f *fakeRoundTripper) Close() error {
+	return nil
+}
+
 func (f *fakeRoundTripper) IsClosed() bool {
 	return false
 }
@@ -23,8 +27,9 @@ func (f *closableFakeRoundTripper) IsClosed() bool {
 	return f.closed.Load()
 }
 
-func (f *closableFakeRoundTripper) Close() {
+func (f *closableFakeRoundTripper) Close() error {
 	f.closed.Store(true)
+	return nil
 }
 
 func TestMaxConnections(t *testing.T) {
@@ -166,5 +171,43 @@ func TestWarmConnectionsRespectMaxConnectionsCap(t *testing.T) {
 
 	if created.Load() != 2 {
 		t.Fatalf("expected warm pool to honor maxConnections cap, got %d created clients", created.Load())
+	}
+}
+
+func TestNonReusableClientStaysTrackedUntilReleased(t *testing.T) {
+	var created atomic.Int32
+	var clients []*closableFakeRoundTripper
+
+	xmuxManager := NewXmuxManager(XmuxConfig{
+		MaxConnections: &RangeConfig{From: 1, To: 1},
+		CMaxReuseTimes: &RangeConfig{From: 1, To: 1},
+	}, func() XmuxConn {
+		client := &closableFakeRoundTripper{}
+		created.Add(1)
+		clients = append(clients, client)
+		return client
+	})
+
+	inUse := xmuxManager.ReserveXmuxClient(context.Background())
+	if created.Load() != 1 {
+		t.Fatalf("expected exactly one client after first reservation, got %d", created.Load())
+	}
+
+	replacement := xmuxManager.GetXmuxClient(context.Background())
+	if replacement == inUse {
+		t.Fatal("expected a replacement client after the first one became non-reusable")
+	}
+	if created.Load() != 2 {
+		t.Fatalf("expected a replacement client to be created, got %d", created.Load())
+	}
+	if clients[0].IsClosed() {
+		t.Fatal("expected in-use non-reusable client to stay open")
+	}
+
+	inUse.OpenUsage.Add(-1)
+	xmuxManager.GetXmuxClient(context.Background())
+
+	if !clients[0].IsClosed() {
+		t.Fatal("expected released non-reusable client to be closed on cleanup")
 	}
 }

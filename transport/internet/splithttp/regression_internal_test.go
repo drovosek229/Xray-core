@@ -21,6 +21,10 @@ import (
 
 type fakeDialerClient struct{}
 
+func (f *fakeDialerClient) Close() error {
+	return nil
+}
+
 func (f *fakeDialerClient) IsClosed() bool {
 	return false
 }
@@ -196,7 +200,7 @@ func TestRelayAsyncStartFailureClosesBothSidesWithOriginalError(t *testing.T) {
 	pipeReader, pipeWriter := io.Pipe()
 	defer pipeReader.Close()
 
-	relayAsyncStartFailure(&startedReadCloserStub{err: expectedErr}, reader, pipeWriter, pipeReader)
+	relayAsyncStartFailure(&startedReadCloserStub{err: expectedErr}, reader, pipeWriter, pipeReader, nil)
 
 	readErr := waitForReadError(t, reader)
 	assertHTTPStatusError(t, readErr, http.StatusServiceUnavailable)
@@ -205,6 +209,43 @@ func TestRelayAsyncStartFailureClosesBothSidesWithOriginalError(t *testing.T) {
 		t.Fatal("expected writer to close with async startup error")
 	} else {
 		assertHTTPStatusError(t, err, http.StatusServiceUnavailable)
+	}
+}
+
+func TestGetNormalizedServerMaxHeaderBytesFollowsUplinkPlacement(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   *Config
+		expected int
+	}{
+		{
+			name:     "body-default",
+			config:   &Config{},
+			expected: 8 * 1024,
+		},
+		{
+			name:     "header-default",
+			config:   &Config{UplinkDataPlacement: PlacementHeader},
+			expected: 16 * 1024,
+		},
+		{
+			name:     "cookie-default",
+			config:   &Config{UplinkDataPlacement: PlacementCookie},
+			expected: 16 * 1024,
+		},
+		{
+			name:     "explicit-override",
+			config:   &Config{UplinkDataPlacement: PlacementHeader, ServerMaxHeaderBytes: 24 * 1024},
+			expected: 24 * 1024,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.config.GetNormalizedServerMaxHeaderBytes(); got != test.expected {
+				t.Fatalf("expected max header bytes %d, got %d", test.expected, got)
+			}
+		})
 	}
 }
 
@@ -348,6 +389,134 @@ func TestServeHTTPReturnsExpectedUploadStatuses(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestServeHTTPRejectsSessionlessExplicitStreamUp(t *testing.T) {
+	handler := newRequestHandlerForTest(&Config{
+		Path:               "/x",
+		Mode:               "stream-up",
+		XPaddingBytes:      &RangeConfig{From: 1, To: 1},
+		ScMaxEachPostBytes: &RangeConfig{From: 16, To: 16},
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "http://example.com/x/?x_padding=X", bytes.NewBufferString("x"))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for sessionless stream-up upload, got %d", recorder.Code)
+	}
+}
+
+func TestServeHTTPRejectsPacketSeqWithoutSession(t *testing.T) {
+	handler := newRequestHandlerForTest(&Config{
+		Path:               "/x",
+		Mode:               "packet-up",
+		SessionPlacement:   PlacementQuery,
+		SeqPlacement:       PlacementQuery,
+		XPaddingBytes:      &RangeConfig{From: 1, To: 1},
+		ScMaxEachPostBytes: &RangeConfig{From: 16, To: 16},
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "http://example.com/x/?x_padding=X&x_seq=0", bytes.NewBufferString("x"))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for packet-up without session id, got %d", recorder.Code)
+	}
+}
+
+func TestDialerConfigKeyStableAcrossEquivalentConfigs(t *testing.T) {
+	dest := xnet.TCPDestination(xnet.DomainAddress("example.com"), 443)
+	config1 := &internet.MemoryStreamConfig{
+		ProtocolName:     "splithttp",
+		ProtocolSettings: &Config{Path: "/x", Host: "example.com", Xmux: &XmuxConfig{MaxConnections: &RangeConfig{From: 2, To: 2}}},
+		SocketSettings:   &internet.SocketConfig{TcpKeepAliveInterval: 7},
+	}
+	config2 := &internet.MemoryStreamConfig{
+		ProtocolName:     "splithttp",
+		ProtocolSettings: &Config{Path: "/x", Host: "example.com", Xmux: &XmuxConfig{MaxConnections: &RangeConfig{From: 2, To: 2}}},
+		SocketSettings:   &internet.SocketConfig{TcpKeepAliveInterval: 7},
+	}
+
+	if key1, key2 := dialerConfigKey(dest, config1), dialerConfigKey(dest, config2); key1 != key2 {
+		t.Fatalf("expected equivalent stream configs to share the same dialer key, got %#v and %#v", key1, key2)
+	}
+}
+
+type closableXmuxConn struct {
+	closed bool
+}
+
+func (c *closableXmuxConn) Close() error {
+	c.closed = true
+	return nil
+}
+
+func (c *closableXmuxConn) IsClosed() bool {
+	return c.closed
+}
+
+func TestCleanupGlobalDialersLockedEvictsIdleManagers(t *testing.T) {
+	manager := NewXmuxManager(XmuxConfig{}, func() XmuxConn {
+		return &closableXmuxConn{}
+	})
+	xmuxClient := manager.GetXmuxClient(context.Background())
+	closable, ok := xmuxClient.XmuxConn.(*closableXmuxConn)
+	if !ok {
+		t.Fatal("expected closable xmux conn")
+	}
+	manager.lastAccess = time.Now().Add(-dialerManagerIdleTimeout - time.Second)
+
+	globalDialerAccess.Lock()
+	defer globalDialerAccess.Unlock()
+
+	oldMap := globalDialerMap
+	defer func() {
+		globalDialerMap = oldMap
+	}()
+
+	globalDialerMap = map[dialerConf]*XmuxManager{
+		{Destination: "tcp:example.com:443", SettingsKey: "abc"}: manager,
+	}
+
+	cleanupGlobalDialersLocked(time.Now())
+
+	if len(globalDialerMap) != 0 {
+		t.Fatalf("expected idle manager eviction, got %d managers", len(globalDialerMap))
+	}
+	if !closable.closed {
+		t.Fatal("expected idle manager eviction to close tracked clients")
+	}
+}
+
+func TestCleanupGlobalDialersLockedKeepsInUseManagers(t *testing.T) {
+	manager := NewXmuxManager(XmuxConfig{}, func() XmuxConn {
+		return &closableXmuxConn{}
+	})
+	xmuxClient := manager.ReserveXmuxClient(context.Background())
+	manager.lastAccess = time.Now().Add(-dialerManagerIdleTimeout - time.Second)
+
+	globalDialerAccess.Lock()
+	defer globalDialerAccess.Unlock()
+
+	oldMap := globalDialerMap
+	defer func() {
+		globalDialerMap = oldMap
+	}()
+
+	globalDialerMap = map[dialerConf]*XmuxManager{
+		{Destination: "tcp:example.com:443", SettingsKey: "abc"}: manager,
+	}
+
+	cleanupGlobalDialersLocked(time.Now())
+
+	if len(globalDialerMap) != 1 {
+		t.Fatalf("expected in-use manager to remain tracked, got %d managers", len(globalDialerMap))
+	}
+
+	xmuxClient.OpenUsage.Add(-1)
 }
 
 func TestUploadQueueCloseUnblocksBlockedPushAndRead(t *testing.T) {

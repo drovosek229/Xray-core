@@ -3,9 +3,12 @@ package splithttp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	gotls "crypto/tls"
+	"encoding/hex"
 	stderrors "errors"
 	"fmt"
+	"hash"
 	"io"
 	"math/rand"
 	"net/http"
@@ -34,17 +37,20 @@ import (
 	"github.com/drovosek229/Xray-core/transport/internet/tls"
 	"github.com/drovosek229/Xray-core/transport/pipe"
 	"golang.org/x/net/http2"
+	"google.golang.org/protobuf/proto"
 )
 
 type dialerConf struct {
-	net.Destination
-	*internet.MemoryStreamConfig
+	Destination string
+	SettingsKey string
 }
 
 var (
 	globalDialerMap    map[dialerConf]*XmuxManager
 	globalDialerAccess sync.Mutex
 )
+
+const dialerManagerIdleTimeout = 2 * net.ConnIdleTimeout
 
 type httpClientReservation struct {
 	client      DialerClient
@@ -54,9 +60,6 @@ type httpClientReservation struct {
 
 func reserveHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) *httpClientReservation {
 	client, xmuxClient := getHTTPClient(ctx, dest, streamSettings)
-	if xmuxClient != nil {
-		xmuxClient.OpenUsage.Add(1)
-	}
 	return &httpClientReservation{
 		client:     client,
 		xmuxClient: xmuxClient,
@@ -167,21 +170,198 @@ func closeWriteWithError(writer io.WriteCloser, err error) {
 	_ = writer.Close()
 }
 
-func relayAsyncStartFailure(started StartedReadCloser, reader io.ReadCloser, writer io.WriteCloser, uploadBody io.ReadCloser) {
+type startupContext struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+	once   sync.Once
+}
+
+func newStartupContext(parent context.Context, connCtx context.Context) *startupContext {
+	ctx, cancel := context.WithCancel(connCtx)
+	startup := &startupContext{
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+	if parent != nil {
+		go func() {
+			select {
+			case <-parent.Done():
+				startup.Cancel()
+			case <-startup.done:
+			}
+		}()
+	}
+	return startup
+}
+
+func (s *startupContext) Context() context.Context {
+	if s == nil {
+		return context.Background()
+	}
+	return s.ctx
+}
+
+func (s *startupContext) Detach() {
+	if s == nil {
+		return
+	}
+	s.once.Do(func() {
+		close(s.done)
+	})
+}
+
+func (s *startupContext) Cancel() {
+	if s == nil {
+		return
+	}
+	s.once.Do(func() {
+		s.cancel()
+		close(s.done)
+	})
+}
+
+func (s *startupContext) Complete(err error) error {
+	if err != nil {
+		s.Cancel()
+		return err
+	}
+	s.Detach()
+	return nil
+}
+
+func relayAsyncStartFailure(started StartedReadCloser, reader io.ReadCloser, writer io.WriteCloser, uploadBody io.ReadCloser, startup *startupContext) {
 	if started == nil {
+		startup.Detach()
 		return
 	}
 
 	go func() {
 		if err := started.WaitStart(); err != nil {
+			startup.Complete(err)
 			closeReadWithError(reader, err)
 			if uploadBody != nil {
 				closeReadWithError(uploadBody, err)
 				return
 			}
 			closeWriteWithError(writer, err)
+			return
 		}
+		startup.Detach()
 	}()
+}
+
+func dialerConfigKey(dest net.Destination, streamSettings *internet.MemoryStreamConfig) dialerConf {
+	return dialerConf{
+		Destination: dest.String(),
+		SettingsKey: buildDialerSettingsKey(streamSettings),
+	}
+}
+
+func buildDialerSettingsKey(streamSettings *internet.MemoryStreamConfig) string {
+	hasher := sha256.New()
+	if streamSettings == nil {
+		writeDialerSegment(hasher, "nil", "true")
+		return hex.EncodeToString(hasher.Sum(nil))
+	}
+
+	writeDialerSegment(hasher, "protocol_name", streamSettings.ProtocolName)
+	writeDialerSegment(hasher, "security_type", streamSettings.SecurityType)
+	writeProtoDialerSegment(hasher, "protocol_settings", streamSettings.ProtocolSettings)
+	writeProtoDialerSegment(hasher, "security_settings", streamSettings.SecuritySettings)
+	writeProtoDialerSegment(hasher, "socket_settings", streamSettings.SocketSettings)
+	writeProtoDialerSegment(hasher, "quic_params", streamSettings.QuicParams)
+	writeDialerSegment(hasher, "tcpmask_manager", reflectValueSignature(reflect.ValueOf(streamSettings.TcpmaskManager)))
+	writeDialerSegment(hasher, "udpmask_manager", reflectValueSignature(reflect.ValueOf(streamSettings.UdpmaskManager)))
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func writeDialerSegment(hasher hash.Hash, label string, value string) {
+	_, _ = hasher.Write([]byte(label))
+	_, _ = hasher.Write([]byte{0})
+	_, _ = hasher.Write([]byte(value))
+	_, _ = hasher.Write([]byte{0xff})
+}
+
+func writeProtoDialerSegment(hasher hash.Hash, label string, value any) {
+	if value == nil {
+		writeDialerSegment(hasher, label, "<nil>")
+		return
+	}
+	if message, ok := value.(proto.Message); ok {
+		bytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(message)
+		if err == nil {
+			writeDialerSegment(hasher, label, hex.EncodeToString(bytes))
+			return
+		}
+	}
+	writeDialerSegment(hasher, label, reflectValueSignature(reflect.ValueOf(value)))
+}
+
+func reflectValueSignature(value reflect.Value) string {
+	hasher := sha256.New()
+	hashReflectValue(hasher, value)
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func hashReflectValue(hasher hash.Hash, value reflect.Value) {
+	if !value.IsValid() {
+		writeDialerSegment(hasher, "kind", "<invalid>")
+		return
+	}
+
+	writeDialerSegment(hasher, "type", value.Type().String())
+
+	switch value.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if value.IsNil() {
+			writeDialerSegment(hasher, "value", "<nil>")
+			return
+		}
+		hashReflectValue(hasher, value.Elem())
+	case reflect.Struct:
+		for i := 0; i < value.NumField(); i++ {
+			writeDialerSegment(hasher, "field", value.Type().Field(i).Name)
+			hashReflectValue(hasher, value.Field(i))
+		}
+	case reflect.Slice, reflect.Array:
+		writeDialerSegment(hasher, "len", strconv.Itoa(value.Len()))
+		for i := 0; i < value.Len(); i++ {
+			hashReflectValue(hasher, value.Index(i))
+		}
+	case reflect.Map:
+		writeDialerSegment(hasher, "len", strconv.Itoa(value.Len()))
+		for _, key := range value.MapKeys() {
+			hashReflectValue(hasher, key)
+			hashReflectValue(hasher, value.MapIndex(key))
+		}
+	case reflect.String:
+		writeDialerSegment(hasher, "value", value.String())
+	case reflect.Bool:
+		writeDialerSegment(hasher, "value", strconv.FormatBool(value.Bool()))
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		writeDialerSegment(hasher, "value", strconv.FormatInt(value.Int(), 10))
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		writeDialerSegment(hasher, "value", strconv.FormatUint(value.Uint(), 10))
+	case reflect.Float32, reflect.Float64:
+		writeDialerSegment(hasher, "value", strconv.FormatFloat(value.Float(), 'g', -1, 64))
+	case reflect.Complex64, reflect.Complex128:
+		complexValue := value.Complex()
+		writeDialerSegment(hasher, "real", strconv.FormatFloat(real(complexValue), 'g', -1, 64))
+		writeDialerSegment(hasher, "imag", strconv.FormatFloat(imag(complexValue), 'g', -1, 64))
+	default:
+		writeDialerSegment(hasher, "value", fmt.Sprintf("%v", value))
+	}
+}
+
+func cleanupGlobalDialersLocked(now time.Time) {
+	for key, manager := range globalDialerMap {
+		if manager.ShouldEvict(now, dialerManagerIdleTimeout) {
+			delete(globalDialerMap, key)
+			manager.Close()
+		}
+	}
 }
 
 func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (DialerClient, *XmuxClient) {
@@ -198,7 +378,10 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 		globalDialerMap = make(map[dialerConf]*XmuxManager)
 	}
 
-	key := dialerConf{dest, streamSettings}
+	now := time.Now()
+	cleanupGlobalDialersLocked(now)
+
+	key := dialerConfigKey(dest, streamSettings)
 
 	xmuxManager, found := globalDialerMap[key]
 
@@ -212,7 +395,7 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 		globalDialerMap[key] = xmuxManager
 	}
 
-	xmuxClient := xmuxManager.GetXmuxClient(ctx)
+	xmuxClient := xmuxManager.ReserveXmuxClient(ctx)
 	return xmuxClient.XmuxConn.(DialerClient), xmuxClient
 }
 
@@ -512,7 +695,8 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	requestURL.Path = transportConfiguration.GetNormalizedPath()
 	requestURL.RawQuery = transportConfiguration.GetNormalizedQuery()
 
-	uploadReservation := reserveHTTPClient(ctx, dest, streamSettings)
+	connCtx, connCancel := context.WithCancel(context.Background())
+	uploadReservation := reserveHTTPClient(connCtx, dest, streamSettings)
 	requestBehavior := transportConfiguration.NewRequestBehavior(httpVersion)
 
 	mode := transportConfiguration.Mode
@@ -572,7 +756,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		}
 		requestURL2.Path = config2.GetNormalizedPath()
 		requestURL2.RawQuery = config2.GetNormalizedQuery()
-		downloadReservation = reserveHTTPClient(ctx, dest2, memory2)
+		downloadReservation = reserveHTTPClient(connCtx, dest2, memory2)
 		requestBehavior2 = config2.NewRequestBehavior(httpVersion2)
 		errors.LogInfo(ctx, fmt.Sprintf("XHTTP is downloading from %s, mode %s, HTTP version %s, host %s", dest2, "stream-down", httpVersion2, requestURL2.Host))
 	}
@@ -587,6 +771,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			if closed.Add(1) > 1 {
 				return
 			}
+			connCancel()
 			packetUploadReservations.Release()
 			if downloadReservation != uploadReservation {
 				downloadReservation.Release()
@@ -597,18 +782,24 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	if mode == "stream-one" {
 		requestURL.Path = transportConfiguration.GetNormalizedPath()
 		uploadReservation.ConsumeRequest()
-		streamReader, remoteAddr, localAddr, err := uploadReservation.Client().OpenStream(ctx, requestURL.String(), sessionId, reader, false, requestBehavior)
+		startup := newStartupContext(ctx, connCtx)
+		streamReader, remoteAddr, localAddr, err := uploadReservation.Client().OpenStream(startup.Context(), requestURL.String(), sessionId, reader, false, requestBehavior)
 		if err != nil { // browser dialer only
+			startup.Cancel()
+			connCancel()
 			uploadReservation.Release()
 			return nil, err
 		}
 		conn.reader, conn.remoteAddr, conn.localAddr = streamReader, remoteAddr, localAddr
-		relayAsyncStartFailure(streamReader, nil, conn.writer, reader)
+		relayAsyncStartFailure(streamReader, nil, conn.writer, reader, startup)
 		return stat.Connection(&conn), nil
 	} else { // stream-down
 		downloadReservation.ConsumeRequest()
-		streamReader, remoteAddr, localAddr, err := downloadReservation.Client().OpenStream(ctx, requestURL2.String(), sessionId, nil, false, requestBehavior2)
+		startup := newStartupContext(ctx, connCtx)
+		streamReader, remoteAddr, localAddr, err := downloadReservation.Client().OpenStream(startup.Context(), requestURL2.String(), sessionId, nil, false, requestBehavior2)
 		if err != nil { // browser dialer only
+			startup.Cancel()
+			connCancel()
 			if downloadReservation != uploadReservation {
 				downloadReservation.Release()
 			}
@@ -616,25 +807,31 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 			return nil, err
 		}
 		if err := streamReader.WaitStart(); err != nil {
+			startup.Complete(err)
+			connCancel()
 			if downloadReservation != uploadReservation {
 				downloadReservation.Release()
 			}
 			packetUploadReservations.Release()
 			return nil, err
 		}
+		startup.Detach()
 		conn.reader, conn.remoteAddr, conn.localAddr = streamReader, remoteAddr, localAddr
 	}
 	if mode == "stream-up" {
 		uploadReservation.ConsumeRequest()
-		uploadReader, _, _, err := uploadReservation.Client().OpenStream(ctx, requestURL.String(), sessionId, reader, true, requestBehavior)
+		startup := newStartupContext(ctx, connCtx)
+		uploadReader, _, _, err := uploadReservation.Client().OpenStream(startup.Context(), requestURL.String(), sessionId, reader, true, requestBehavior)
 		if err != nil { // browser dialer only
+			startup.Cancel()
+			connCancel()
 			if downloadReservation != uploadReservation {
 				downloadReservation.Release()
 			}
 			packetUploadReservations.Release()
 			return nil, err
 		}
-		relayAsyncStartFailure(uploadReader, conn.reader, conn.writer, reader)
+		relayAsyncStartFailure(uploadReader, conn.reader, conn.writer, reader, startup)
 		return stat.Connection(&conn), nil
 	}
 
@@ -687,7 +884,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 				wroteRequest := done.New()
 
-				ctx := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+				requestCtx := httptrace.WithClientTrace(connCtx, &httptrace.ClientTrace{
 					WroteRequest: func(httptrace.WroteRequestInfo) {
 						wroteRequest.Close()
 					},
@@ -703,7 +900,15 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 					}
 					sleepFor -= time.Since(lastWrite)
 					if sleepFor > 0 {
-						time.Sleep(sleepFor)
+						timer := time.NewTimer(sleepFor)
+						select {
+						case <-connCtx.Done():
+							timer.Stop()
+							uploadPipeReader.Interrupt()
+							doSplit.Store(false)
+							return
+						case <-timer.C:
+						}
 					}
 				}
 
@@ -711,7 +916,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 				currentReservation := packetUploadReservations.Current()
 				if currentReservation == nil || currentReservation.NeedsRefresh(lastWrite) {
-					nextReservation := reserveHTTPClient(ctx, dest, streamSettings)
+					nextReservation := reserveHTTPClient(connCtx, dest, streamSettings)
 					if oldReservation := packetUploadReservations.Swap(nextReservation); oldReservation != nil {
 						oldReservation.Release()
 					}
@@ -722,7 +927,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 				payloadBytes, err := buf.ReadAllToBytes(&buf.MultiBufferContainer{MultiBuffer: chunk})
 				if err != nil {
-					errors.LogInfoInner(ctx, err, "failed to buffer upload")
+					errors.LogInfoInner(requestCtx, err, "failed to buffer upload")
 					uploadPipeReader.Interrupt()
 					doSplit.Store(false)
 					break
@@ -730,7 +935,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 				go func() {
 					err := postPacketWithRetry(
-						ctx,
+						requestCtx,
 						httpClient,
 						transportConfiguration,
 						requestURL.String(),
@@ -741,7 +946,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 					)
 					wroteRequest.Close()
 					if err != nil {
-						errors.LogInfoInner(ctx, err, "failed to send upload")
+						errors.LogInfoInner(requestCtx, err, "failed to send upload")
 						uploadPipeReader.Interrupt()
 						doSplit.Store(false)
 					}
@@ -832,6 +1037,9 @@ func postPacketWithRetry(ctx context.Context, client DialerClient, config *Confi
 
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		lastErr = client.PostPacket(
 			ctx,
 			requestURL,
@@ -849,7 +1057,13 @@ func postPacketWithRetry(ctx context.Context, client DialerClient, config *Confi
 		}
 
 		backoff := time.Duration(25*(1<<attempt))*time.Millisecond + time.Duration(cryptoRandJitterMillis(25))*time.Millisecond
-		time.Sleep(backoff)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 	return lastErr
 }

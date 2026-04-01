@@ -18,6 +18,10 @@ type BrowserDialerClient struct {
 	closed          atomic.Bool
 }
 
+func (c *BrowserDialerClient) Close() error {
+	return nil
+}
+
 func (c *BrowserDialerClient) IsClosed() bool {
 	return c.closed.Load() || !browser_dialer.HasBrowserDialer()
 }

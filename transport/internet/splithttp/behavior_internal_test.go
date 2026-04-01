@@ -4,14 +4,42 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	stderrors "errors"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
+
+	xnet "github.com/drovosek229/Xray-core/common/net"
 )
+
+type blockingDialerClient struct {
+	started  chan struct{}
+	canceled chan struct{}
+}
+
+func (c *blockingDialerClient) Close() error {
+	return nil
+}
+
+func (c *blockingDialerClient) IsClosed() bool {
+	return false
+}
+
+func (c *blockingDialerClient) OpenStream(_ context.Context, _ string, _ string, _ io.Reader, _ bool, _ *RequestBehavior) (StartedReadCloser, xnet.Addr, xnet.Addr, error) {
+	return &readyReadCloser{ReadCloser: io.NopCloser(bytes.NewReader(nil))}, nil, nil, nil
+}
+
+func (c *blockingDialerClient) PostPacket(ctx context.Context, _ string, _ string, _ string, _ io.Reader, _ int64, _ *RequestBehavior) error {
+	close(c.started)
+	<-ctx.Done()
+	close(c.canceled)
+	return ctx.Err()
+}
 
 func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
@@ -244,6 +272,111 @@ func TestH1UploadRetriesReplayableBody(t *testing.T) {
 
 	if dialCount != 2 {
 		t.Fatalf("expected retry to open a second H1 upload connection, got %d", dialCount)
+	}
+}
+
+func TestDialCancelsStreamStartupWhenParentContextEnds(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := Dial(ctx, destinationFromHTTPURL(t, server.URL), newTestStreamConfig(&Config{Path: "/"}))
+	if !stderrors.Is(err, context.Canceled) {
+		t.Fatalf("expected startup cancellation to return context.Canceled, got %v", err)
+	}
+}
+
+func TestCloseCancelsBlockedPacketUpload(t *testing.T) {
+	postStarted := make(chan struct{})
+	postCanceled := make(chan struct{})
+
+	dest := xnet.TCPDestination(xnet.DomainAddress("example.com"), 443)
+	streamSettings := newTestStreamConfig(&Config{
+		Path:               "/",
+		XPaddingBytes:      &RangeConfig{From: 1, To: 1},
+		ScMaxEachPostBytes: &RangeConfig{From: 32, To: 32},
+	})
+	key := dialerConfigKey(dest, streamSettings)
+	client := &blockingDialerClient{started: postStarted, canceled: postCanceled}
+
+	globalDialerAccess.Lock()
+	oldMap := globalDialerMap
+	globalDialerMap = map[dialerConf]*XmuxManager{
+		key: NewXmuxManager(XmuxConfig{}, func() XmuxConn {
+			return client
+		}),
+	}
+	globalDialerAccess.Unlock()
+	defer func() {
+		globalDialerAccess.Lock()
+		globalDialerMap = oldMap
+		globalDialerAccess.Unlock()
+	}()
+
+	conn, err := Dial(context.Background(), dest, streamSettings)
+	if err != nil {
+		t.Fatalf("unexpected dial error: %v", err)
+	}
+
+	if _, err := conn.Write([]byte("payload")); err != nil {
+		_ = conn.Close()
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	select {
+	case <-postStarted:
+	case <-time.After(2 * time.Second):
+		_ = conn.Close()
+		t.Fatal("timed out waiting for packet upload to start")
+	}
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("unexpected conn close error: %v", err)
+	}
+
+	select {
+	case <-postCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for packet upload cancellation")
+	}
+}
+
+func TestH1UploadDialHonorsContextCancellation(t *testing.T) {
+	client := &DefaultDialerClient{
+		transportConfig: &Config{
+			UplinkHTTPMethod: "POST",
+		},
+		httpVersion: "1.1",
+		dialUploadConn: func(ctx context.Context) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	err := client.PostPacket(
+		ctx,
+		"http://example.com/upload",
+		"session",
+		"0",
+		bytes.NewReader([]byte("payload")),
+		int64(len("payload")),
+		nil,
+	)
+	if !stderrors.Is(err, context.Canceled) {
+		t.Fatalf("expected H1 upload dial to return context.Canceled, got %v", err)
 	}
 }
 

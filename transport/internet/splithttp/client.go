@@ -18,6 +18,7 @@ import (
 
 // interface to abstract between use of browser dialer, vs net/http
 type DialerClient interface {
+	Close() error
 	IsClosed() bool
 
 	// ctx, url, sessionId, body, uploadOnly
@@ -56,6 +57,27 @@ func (r *readyReadCloser) CloseWithError(err error) error {
 	return r.Close()
 }
 
+func (c *DefaultDialerClient) Close() error {
+	if c.closed.Swap(true) {
+		return nil
+	}
+
+	c.h1UploadMu.Lock()
+	c.closeH1UploadConn()
+	c.h1UploadMu.Unlock()
+
+	var closeErr error
+	if transport := c.client.Transport; transport != nil {
+		if closer, ok := transport.(interface{ CloseIdleConnections() }); ok {
+			closer.CloseIdleConnections()
+		}
+		if closer, ok := transport.(interface{ Close() error }); ok {
+			closeErr = closer.Close()
+		}
+	}
+	return closeErr
+}
+
 func (c *DefaultDialerClient) IsClosed() bool {
 	return c.closed.Load()
 }
@@ -84,14 +106,19 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 	if body != nil {
 		method = c.transportConfig.GetNormalizedUplinkHTTPMethod() // stream-up/one
 	}
-	req, _ := http.NewRequestWithContext(context.WithoutCancel(ctx), method, url, body)
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	c.transportConfig.FillStreamRequest(req, sessionId, "", behavior)
 
 	resultCh := make(chan streamOpenResult, 1)
 	go func() {
 		resp, err := c.client.Do(req)
 		if err != nil {
-			c.closed.Store(true)
+			if ctx.Err() == nil {
+				c.closed.Store(true)
+			}
 			errors.LogInfoInner(ctx, err, "failed to "+method+" "+url)
 			gotConn.Close()
 			resultCh <- streamOpenResult{err: err}
@@ -140,7 +167,7 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 
 func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessionId string, seqStr string, body io.Reader, contentLength int64, behavior *RequestBehavior) error {
 	method := c.transportConfig.GetNormalizedUplinkHTTPMethod()
-	req, err := http.NewRequestWithContext(context.WithoutCancel(ctx), method, url, body)
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return err
 	}
@@ -153,7 +180,9 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 		startedAt := time.Now()
 		resp, err := c.client.Do(req)
 		if err != nil {
-			c.closed.Store(true)
+			if ctx.Err() == nil {
+				c.closed.Store(true)
+			}
 			return err
 		}
 
@@ -192,10 +221,17 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 				return err
 			}
 
+			stopAbort := context.AfterFunc(ctx, func() {
+				_ = h1UploadConn.Close()
+			})
 			startedAt := time.Now()
 			if bufferedRequest != nil {
 				if _, err := h1UploadConn.ReqBufWriter.Write(bufferedRequest); err != nil {
+					stopAbort()
 					c.closeH1UploadConn()
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
 					if attempt == 0 {
 						continue
 					}
@@ -206,12 +242,16 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 				if attempt > 0 && req.GetBody != nil {
 					req.Body, err = req.GetBody()
 					if err != nil {
-						c.closed.Store(true)
+						stopAbort()
 						return err
 					}
 				}
 				if err := req.Write(h1UploadConn.ReqBufWriter); err != nil {
+					stopAbort()
 					c.closeH1UploadConn()
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
 					if attempt == 0 {
 						continue
 					}
@@ -220,7 +260,11 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 				}
 			}
 			if err := h1UploadConn.ReqBufWriter.Flush(); err != nil {
+				stopAbort()
 				c.closeH1UploadConn()
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				if attempt == 0 {
 					continue
 				}
@@ -230,8 +274,12 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 			h1UploadConn.UnreadedResponsesCount++
 
 			resp, err := http.ReadResponse(h1UploadConn.RespBufReader, req)
+			stopAbort()
 			if err != nil {
 				c.closeH1UploadConn()
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				if attempt == 0 {
 					continue
 				}
@@ -277,7 +325,7 @@ func (c *DefaultDialerClient) getOrCreateH1UploadConn(ctx context.Context) (*H1C
 	if c.h1UploadConn != nil {
 		return c.h1UploadConn, nil
 	}
-	newConn, err := c.dialUploadConn(context.WithoutCancel(ctx))
+	newConn, err := c.dialUploadConn(ctx)
 	if err != nil {
 		return nil, err
 	}

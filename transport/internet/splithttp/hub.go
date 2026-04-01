@@ -8,6 +8,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"io"
+	stdnet "net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -63,6 +64,16 @@ type httpSession struct {
 const sessionSweepInterval = 500 * time.Millisecond
 
 var errSessionGone = stderrors.New("xhttp session gone")
+
+func isExpectedHTTPServerCloseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if stderrors.Is(err, http.ErrServerClosed) || stderrors.Is(err, stdnet.ErrClosed) {
+		return true
+	}
+	return strings.Contains(err.Error(), "use of closed network connection")
+}
 
 func newHTTPSession(config *Config) *httpSession {
 	session := &httpSession{
@@ -333,8 +344,14 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 	sessionId, seqStr := h.config.ExtractMetaFromRequest(request, h.path)
 
-	if sessionId == "" && h.config.Mode != "" && h.config.Mode != "auto" && h.config.Mode != "stream-one" && h.config.Mode != "stream-up" {
-		errors.LogInfo(context.Background(), "stream-one mode is not allowed")
+	if seqStr != "" && sessionId == "" {
+		errors.LogInfo(context.Background(), "packet-up requires session id")
+		writer.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	if sessionId == "" && h.config.Mode != "" && h.config.Mode != "auto" && h.config.Mode != "stream-one" {
+		errors.LogInfo(context.Background(), "session id is required for mode ", h.config.Mode)
 		writer.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -778,7 +795,7 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 			Protocols:         protocols,
 		}
 		go func() {
-			if err := l.server.Serve(l.listener); err != nil {
+			if err := l.server.Serve(l.listener); err != nil && !isExpectedHTTPServerCloseError(err) {
 				errors.LogErrorInner(ctx, err, "failed to serve HTTP for XHTTP")
 			}
 		}()
@@ -808,7 +825,7 @@ func (ln *Listener) Close() error {
 			err = ln.h3listener.Close()
 		}
 	} else if ln.listener != nil {
-		err = ln.listener.Close()
+		err = ln.server.Close()
 	} else {
 		err = errors.New("listener does not have an HTTP/3 server or a net.listener")
 	}
