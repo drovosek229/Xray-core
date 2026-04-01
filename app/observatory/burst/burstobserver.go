@@ -18,24 +18,31 @@ import (
 )
 
 const runtimeFailureReprobeDelay = 250 * time.Millisecond
+const selectorRefreshInterval = 5 * time.Second
 const maxDuration = time.Duration(1<<63 - 1)
 
 type Observer struct {
 	config *Config
 	ctx    context.Context
 
-	statusLock              sync.RWMutex
-	activeOutbounds         map[string]struct{}
-	status                  []*observatory.OutboundStatus
-	failures                map[string]liveFailure
-	runtimeFailureHistories map[string]runtimeFailureHistory
-	lastFailureTimes        map[string]int64
-	hp                      *HealthPing
+	statusLock                    sync.RWMutex
+	activeOutbounds               map[string]struct{}
+	activeOutboundsReady          bool
+	activeOutboundsGeneration     uint64
+	selectorCacheExpired          bool
+	lastSuccessfulSelectorRefresh time.Time
+	status                        []*observatory.OutboundStatus
+	failures                      map[string]liveFailure
+	runtimeFailureHistories       map[string]runtimeFailureHistory
+	lastFailureTimes              map[string]int64
+	hp                            *HealthPing
 
-	reprobeLock    sync.Mutex
-	pendingReprobe map[string]struct{}
-	reprobeDelay   time.Duration
-	reprobeFn      func(string) (time.Duration, error)
+	reprobeLock             sync.Mutex
+	pendingReprobe          map[string]uint64
+	reprobeDelay            time.Duration
+	reprobeFn               func(string) (time.Duration, error)
+	selectorRefreshInterval time.Duration
+	selectorStaleTTL        time.Duration
 
 	finished *done.Instance
 
@@ -58,13 +65,18 @@ type runtimeFailureHistory struct {
 }
 
 func (o *Observer) GetObservation(ctx context.Context) (proto.Message, error) {
+	o.expireSelectorCacheIfStale(time.Now())
 	o.releaseRecoveredFailures()
 
 	o.statusLock.RLock()
 	status := cloneObservationStatuses(o.status)
 	failures := cloneLiveFailures(o.failures)
+	activeOutbounds := cloneActiveOutbounds(o.activeOutbounds)
+	activeReady := o.activeOutboundsReady
 	o.statusLock.RUnlock()
 
+	status = filterObservationStatuses(status, activeOutbounds, activeReady)
+	failures = filterLiveFailures(failures, activeOutbounds, activeReady)
 	return &observatory.ObservationResult{Status: applyLiveFailures(status, failures)}, nil
 }
 
@@ -124,6 +136,7 @@ func (o *Observer) Type() interface{} {
 func (o *Observer) Start() error {
 	if o.config != nil && len(o.config.SubjectSelector) != 0 {
 		o.finished = done.New()
+		o.startSelectorRefreshLoop()
 		o.hp.StartScheduler(o.selectOutbounds, o.refreshSnapshotForTags)
 	}
 	return nil
@@ -153,17 +166,44 @@ func (o *Observer) refreshSnapshotForTags(tags []string) {
 	o.setStatusSnapshot(o.createResult(), tags)
 }
 
+func (o *Observer) startSelectorRefreshLoop() {
+	go func() {
+		o.refreshActiveOutbounds()
+
+		interval := o.selectorRefreshInterval
+		if interval <= 0 {
+			interval = selectorRefreshInterval
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				o.refreshActiveOutbounds()
+			case <-o.doneWait():
+				return
+			}
+		}
+	}()
+}
+
+func (o *Observer) refreshActiveOutbounds() {
+	tags, err := o.selectOutbounds()
+	if err != nil {
+		errors.LogWarning(o.ctx, "error refresh burst selector cache: ", err)
+		o.expireSelectorCacheIfStale(time.Now())
+		return
+	}
+	o.updateActiveOutbounds(tags)
+}
+
 func (o *Observer) setStatusSnapshot(status []*observatory.OutboundStatus, activeTags ...[]string) {
 	o.statusLock.Lock()
 	defer o.statusLock.Unlock()
 
 	if len(activeTags) != 0 && activeTags[0] != nil {
-		activeSet := make(map[string]struct{}, len(activeTags[0]))
-		for _, tag := range activeTags[0] {
-			activeSet[tag] = struct{}{}
-		}
-		o.activeOutbounds = activeSet
-		o.pruneInactiveStateLocked(activeSet)
+		o.updateActiveOutboundsLocked(activeTags[0], time.Now())
 	}
 
 	if len(o.failures) != 0 {
@@ -185,10 +225,12 @@ func (o *Observer) setStatusSnapshot(status []*observatory.OutboundStatus, activ
 			o.releaseRecoveredFailuresLocked(time.Now())
 		}
 	}
-	o.status = status
+	o.status = filterObservationStatuses(status, o.activeOutbounds, o.activeOutboundsReady)
 }
 
 func (o *Observer) RecordOutboundFailure(ctx context.Context, outboundTag, reason string) {
+	o.expireSelectorCacheIfStale(time.Now())
+
 	if outboundTag == "" {
 		return
 	}
@@ -280,26 +322,28 @@ func (o *Observer) scheduleFailureReprobe(outboundTag string) {
 		return
 	}
 
+	generation := o.activeOutboundsGenerationSnapshot()
+
 	o.reprobeLock.Lock()
 	if o.pendingReprobe == nil {
-		o.pendingReprobe = make(map[string]struct{})
+		o.pendingReprobe = make(map[string]uint64)
 	}
-	if _, found := o.pendingReprobe[outboundTag]; found {
+	if pendingGeneration, found := o.pendingReprobe[outboundTag]; found && pendingGeneration >= generation {
 		o.reprobeLock.Unlock()
 		return
 	}
-	o.pendingReprobe[outboundTag] = struct{}{}
+	o.pendingReprobe[outboundTag] = generation
 	o.reprobeLock.Unlock()
 
-	go o.runFailureReprobe(outboundTag)
+	go o.runFailureReprobe(outboundTag, generation)
 }
 
 func (o *Observer) canRunFailureReprobe() bool {
 	return o.hp != nil && o.hp.Settings != nil
 }
 
-func (o *Observer) runFailureReprobe(outboundTag string) {
-	defer o.finishFailureReprobe(outboundTag)
+func (o *Observer) runFailureReprobe(outboundTag string, generation uint64) {
+	defer o.finishFailureReprobe(outboundTag, generation)
 
 	if !o.waitForFailureReprobeDelay() {
 		return
@@ -308,11 +352,17 @@ func (o *Observer) runFailureReprobe(outboundTag string) {
 		o.dropOutboundState(outboundTag)
 		return
 	}
+	if !o.canPublishReprobeResult(outboundTag, generation) {
+		return
+	}
 
 	delay, err := o.probeFailureOutbound(outboundTag)
 	if err != nil {
 		if !o.shouldTrackOutbound(outboundTag) {
 			o.dropOutboundState(outboundTag)
+			return
+		}
+		if !o.canPublishReprobeResult(outboundTag, generation) {
 			return
 		}
 		o.hp.PutResult(outboundTag, rttFailed)
@@ -326,18 +376,23 @@ func (o *Observer) runFailureReprobe(outboundTag string) {
 		o.dropOutboundState(outboundTag)
 		return
 	}
+	if !o.canPublishReprobeResult(outboundTag, generation) {
+		return
+	}
 	o.hp.PutResult(outboundTag, delay)
 	o.markLiveFailureHealthy(outboundTag, observedAt)
 	o.refreshSnapshot()
 }
 
-func (o *Observer) finishFailureReprobe(outboundTag string) {
+func (o *Observer) finishFailureReprobe(outboundTag string, generation uint64) {
 	o.reprobeLock.Lock()
 	defer o.reprobeLock.Unlock()
 	if len(o.pendingReprobe) == 0 {
 		return
 	}
-	delete(o.pendingReprobe, outboundTag)
+	if pendingGeneration, found := o.pendingReprobe[outboundTag]; found && pendingGeneration == generation {
+		delete(o.pendingReprobe, outboundTag)
+	}
 }
 
 func (o *Observer) waitForFailureReprobeDelay() bool {
@@ -424,6 +479,60 @@ func cloneActiveOutbounds(src map[string]struct{}) map[string]struct{} {
 		cloned[tag] = struct{}{}
 	}
 	return cloned
+}
+
+func filterObservationStatuses(statuses []*observatory.OutboundStatus, activeSet map[string]struct{}, activeReady bool) []*observatory.OutboundStatus {
+	if !activeReady {
+		return statuses
+	}
+
+	filtered := make([]*observatory.OutboundStatus, 0, len(statuses))
+	for _, status := range statuses {
+		if status == nil {
+			continue
+		}
+		if _, ok := activeSet[status.OutboundTag]; ok {
+			filtered = append(filtered, status)
+		}
+	}
+	return filtered
+}
+
+func makeActiveOutboundsSet(tags []string) map[string]struct{} {
+	activeSet := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		activeSet[tag] = struct{}{}
+	}
+	return activeSet
+}
+
+func activeOutboundsEqual(left, right map[string]struct{}) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for tag := range left {
+		if _, ok := right[tag]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func filterLiveFailures(failures map[string]liveFailure, activeSet map[string]struct{}, activeReady bool) map[string]liveFailure {
+	if !activeReady || len(failures) == 0 {
+		return failures
+	}
+
+	filtered := make(map[string]liveFailure, len(failures))
+	for tag, failure := range failures {
+		if _, ok := activeSet[tag]; ok {
+			filtered[tag] = failure
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
 }
 
 func (o *Observer) runtimeFailureEnabled() bool {
@@ -559,6 +668,15 @@ func (o *Observer) pruneInactiveStateLocked(activeSet map[string]struct{}) {
 			delete(o.runtimeFailureHistories, tag)
 		}
 	}
+	if o.hp != nil {
+		o.hp.access.Lock()
+		for tag := range o.hp.Results {
+			if _, ok := activeSet[tag]; !ok {
+				delete(o.hp.Results, tag)
+			}
+		}
+		o.hp.access.Unlock()
+	}
 }
 
 func (o *Observer) dropOutboundState(outboundTag string) {
@@ -575,26 +693,134 @@ func (o *Observer) dropOutboundState(outboundTag string) {
 }
 
 func (o *Observer) shouldTrackOutbound(outboundTag string) bool {
+	o.expireSelectorCacheIfStale(time.Now())
+
 	if outboundTag == "" {
 		return false
 	}
-	if tags, err := o.selectOutbounds(); err == nil {
-		for _, tag := range tags {
-			if tag == outboundTag {
-				return true
-			}
-		}
-		return false
-	}
-
 	o.statusLock.RLock()
+	activeReady := o.activeOutboundsReady
+	cacheExpired := o.selectorCacheExpired
 	activeSet := cloneActiveOutbounds(o.activeOutbounds)
 	o.statusLock.RUnlock()
-	if len(activeSet) == 0 {
+
+	if cacheExpired {
+		return false
+	}
+	if !activeReady {
 		return true
 	}
 	_, ok := activeSet[outboundTag]
 	return ok
+}
+
+func (o *Observer) canPublishReprobeResult(outboundTag string, generation uint64) bool {
+	o.expireSelectorCacheIfStale(time.Now())
+
+	o.statusLock.RLock()
+	defer o.statusLock.RUnlock()
+
+	if o.selectorCacheExpired {
+		return false
+	}
+	if !o.activeOutboundsReady {
+		return generation == 0
+	}
+	if o.activeOutboundsGeneration != generation {
+		return false
+	}
+	_, ok := o.activeOutbounds[outboundTag]
+	return ok
+}
+
+func (o *Observer) activeOutboundsGenerationSnapshot() uint64 {
+	o.statusLock.RLock()
+	defer o.statusLock.RUnlock()
+	return o.activeOutboundsGeneration
+}
+
+func (o *Observer) updateActiveOutbounds(tags []string) {
+	o.statusLock.Lock()
+	defer o.statusLock.Unlock()
+	o.updateActiveOutboundsLocked(tags, time.Now())
+}
+
+func (o *Observer) updateActiveOutboundsLocked(tags []string, refreshedAt time.Time) {
+	activeSet := makeActiveOutboundsSet(tags)
+	generationShouldAdvance := o.selectorCacheExpired || (o.activeOutboundsReady && !activeOutboundsEqual(o.activeOutbounds, activeSet))
+
+	o.activeOutbounds = activeSet
+	o.activeOutboundsReady = true
+	o.selectorCacheExpired = false
+	o.lastSuccessfulSelectorRefresh = refreshedAt
+	if generationShouldAdvance {
+		o.activeOutboundsGeneration++
+	}
+	o.pruneInactiveStateLocked(activeSet)
+	o.status = filterObservationStatuses(o.status, activeSet, true)
+}
+
+func (o *Observer) selectorRefreshIntervalValue() time.Duration {
+	if o.selectorRefreshInterval > 0 {
+		return o.selectorRefreshInterval
+	}
+	return selectorRefreshInterval
+}
+
+func (o *Observer) selectorStaleTTLValue() time.Duration {
+	if o.selectorStaleTTL > 0 {
+		return o.selectorStaleTTL
+	}
+
+	interval := o.selectorRefreshIntervalValue()
+	if interval <= 0 {
+		return 0
+	}
+	return interval * 3
+}
+
+func (o *Observer) expireSelectorCacheIfStale(now time.Time) {
+	ttl := o.selectorStaleTTLValue()
+	if ttl <= 0 {
+		return
+	}
+
+	shouldExpire := false
+
+	o.statusLock.Lock()
+	if !o.selectorCacheExpired &&
+		!o.lastSuccessfulSelectorRefresh.IsZero() &&
+		now.Sub(o.lastSuccessfulSelectorRefresh) >= ttl {
+		o.expireSelectorCacheLocked()
+		shouldExpire = true
+	}
+	o.statusLock.Unlock()
+
+	if shouldExpire {
+		o.clearPendingReprobes()
+	}
+}
+
+func (o *Observer) expireSelectorCacheLocked() {
+	o.activeOutbounds = nil
+	o.activeOutboundsReady = false
+	o.selectorCacheExpired = true
+	o.activeOutboundsGeneration++
+	o.status = nil
+	o.failures = nil
+	o.runtimeFailureHistories = nil
+	o.lastFailureTimes = nil
+	if o.hp != nil {
+		o.hp.access.Lock()
+		o.hp.Results = nil
+		o.hp.access.Unlock()
+	}
+}
+
+func (o *Observer) clearPendingReprobes() {
+	o.reprobeLock.Lock()
+	defer o.reprobeLock.Unlock()
+	o.pendingReprobe = nil
 }
 
 func safeMultiplyDuration(value time.Duration, factor int) time.Duration {

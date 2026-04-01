@@ -434,6 +434,7 @@ func TestRecordOutboundFailureIgnoresInactiveOutbound(t *testing.T) {
 			MaxBackoff:  int64(160 * time.Millisecond),
 		},
 	}
+	observer.updateActiveOutbounds([]string{"node-b"})
 
 	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed")
 
@@ -445,6 +446,30 @@ func TestRecordOutboundFailureIgnoresInactiveOutbound(t *testing.T) {
 	}
 	if len(observer.runtimeFailureHistories) != 0 {
 		t.Fatalf("expected no runtime history for inactive outbounds, got %+v", observer.runtimeFailureHistories)
+	}
+	if calls := manager.SelectCallCount(); calls != 0 {
+		t.Fatalf("expected cached active set to avoid selector lookup, got %d selects", calls)
+	}
+}
+
+func TestRecordOutboundFailureUsesCachedActiveOutboundsWithoutSelectorLookup(t *testing.T) {
+	manager := &burstTestHandlerSelectorManager{}
+	manager.SetSelected([]string{"node-a"})
+
+	observer := &Observer{
+		config: &Config{SubjectSelector: []string{"node"}},
+		hp:     nil,
+		ohm:    manager,
+	}
+	observer.updateActiveOutbounds([]string{"node-a"})
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed")
+
+	if _, found := observer.failures["node-a"]; !found {
+		t.Fatal("expected active outbound failure to be recorded")
+	}
+	if calls := manager.SelectCallCount(); calls != 0 {
+		t.Fatalf("expected no selector lookups on failure path, got %d", calls)
 	}
 }
 
@@ -510,9 +535,11 @@ func TestRemovedOutboundPendingReprobeDoesNotRecreateState(t *testing.T) {
 			MaxBackoff:  int64(160 * time.Millisecond),
 		},
 	}
+	observer.updateActiveOutbounds([]string{"node-a"})
 
 	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed")
 	manager.SetSelected([]string{"node-b"})
+	observer.updateActiveOutbounds([]string{"node-b"})
 
 	waitForCondition(t, time.Second, func() bool {
 		return !observer.hasPendingReprobe("node-a")
@@ -532,6 +559,9 @@ func TestRemovedOutboundPendingReprobeDoesNotRecreateState(t *testing.T) {
 	}
 	if _, found := observer.hp.Results["node-a"]; found {
 		t.Fatal("expected removed outbound reprobe to avoid recreating health results")
+	}
+	if calls := manager.SelectCallCount(); calls != 0 {
+		t.Fatalf("expected reprobe path to avoid selector lookup, got %d selects", calls)
 	}
 }
 
@@ -568,9 +598,333 @@ func TestReintroducedOutboundStartsFreshRuntimeFailureStreak(t *testing.T) {
 	assertBackoffNear(t, time.Until(observer.failures["node-a"].backoffUntil), 20*time.Millisecond)
 }
 
+func TestSelectorRefreshRemovesOutboundFromObservationImmediately(t *testing.T) {
+	observer := &Observer{}
+	observer.setStatusSnapshot([]*observatory.OutboundStatus{
+		{
+			Alive:       true,
+			Delay:       20,
+			OutboundTag: "node-a",
+		},
+		{
+			Alive:       true,
+			Delay:       30,
+			OutboundTag: "node-b",
+		},
+	}, []string{"node-a", "node-b"})
+
+	observer.updateActiveOutbounds([]string{"node-b"})
+
+	response, err := observer.GetObservation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := response.(*observatory.ObservationResult).Status
+	if len(statuses) != 1 || statuses[0].OutboundTag != "node-b" {
+		t.Fatalf("expected selector refresh to hide node-a immediately, got %+v", statuses)
+	}
+}
+
+func TestSameMembershipRefreshDoesNotInvalidatePendingReprobe(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+
+	observer := &Observer{
+		hp:           newTestHealthPing(),
+		reprobeDelay: 10 * time.Millisecond,
+		reprobeFn: func(string) (time.Duration, error) {
+			started <- struct{}{}
+			<-release
+			return 25 * time.Millisecond, nil
+		},
+	}
+	observer.updateActiveOutbounds([]string{"node-a"})
+	initialGeneration := observer.activeOutboundsGenerationSnapshot()
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed")
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("expected reprobe to start")
+	}
+
+	observer.updateActiveOutbounds([]string{"node-a"})
+	if generation := observer.activeOutboundsGenerationSnapshot(); generation != initialGeneration {
+		t.Fatalf("expected same-membership refresh to keep generation %d, got %d", initialGeneration, generation)
+	}
+
+	close(release)
+
+	waitForCondition(t, time.Second, func() bool {
+		response, err := observer.GetObservation(context.Background())
+		if err != nil {
+			return false
+		}
+		statuses := response.(*observatory.ObservationResult).Status
+		return len(statuses) == 1 && statuses[0].OutboundTag == "node-a" && statuses[0].Alive
+	}, "expected same-membership refresh to keep healthy reprobe publishable")
+}
+
+func TestRefreshActiveOutboundsErrorKeepsPreviousCacheAndObservation(t *testing.T) {
+	observer := &Observer{
+		ctx: context.Background(),
+	}
+	observer.setStatusSnapshot([]*observatory.OutboundStatus{
+		{
+			Alive:       true,
+			Delay:       20,
+			OutboundTag: "node-a",
+		},
+	}, []string{"node-a"})
+
+	observer.refreshActiveOutbounds()
+
+	response, err := observer.GetObservation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := response.(*observatory.ObservationResult).Status
+	if len(statuses) != 1 || statuses[0].OutboundTag != "node-a" {
+		t.Fatalf("expected selector refresh error to preserve cached observation, got %+v", statuses)
+	}
+}
+
+func TestNewerGenerationFailureSchedulesFreshReprobeAndKeepsReservation(t *testing.T) {
+	var calls atomic.Int32
+	started := make(chan int32, 2)
+	releaseFirst := make(chan struct{})
+	releaseSecond := make(chan struct{})
+
+	observer := &Observer{
+		hp:           newTestHealthPing(),
+		reprobeDelay: 10 * time.Millisecond,
+		reprobeFn: func(string) (time.Duration, error) {
+			call := calls.Add(1)
+			started <- call
+			if call == 1 {
+				<-releaseFirst
+			} else {
+				<-releaseSecond
+			}
+			return 25 * time.Millisecond, nil
+		},
+	}
+	observer.updateActiveOutbounds([]string{"node-a"})
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed")
+
+	select {
+	case call := <-started:
+		if call != 1 {
+			t.Fatalf("expected first reprobe call to be 1, got %d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected first reprobe to start")
+	}
+
+	initialGeneration := observer.activeOutboundsGenerationSnapshot()
+	observer.updateActiveOutbounds([]string{"node-b"})
+	observer.updateActiveOutbounds([]string{"node-a"})
+	currentGeneration := observer.activeOutboundsGenerationSnapshot()
+	if currentGeneration == initialGeneration {
+		t.Fatal("expected changed membership to advance selector generation")
+	}
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed again")
+
+	select {
+	case call := <-started:
+		if call != 2 {
+			t.Fatalf("expected second reprobe call to be 2, got %d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected newer-generation failure to start a fresh reprobe")
+	}
+
+	close(releaseFirst)
+
+	waitForCondition(t, time.Second, func() bool {
+		return observer.pendingReprobeGeneration("node-a") == currentGeneration
+	}, "expected stale reprobe completion to keep newer pending reservation")
+
+	close(releaseSecond)
+
+	waitForCondition(t, time.Second, func() bool {
+		return !observer.hasPendingReprobe("node-a")
+	}, "expected newer reprobe reservation to clear after completion")
+}
+
+func TestRemovedAndReaddedOutboundDoesNotPublishStaleReprobeResult(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+
+	observer := &Observer{
+		hp:           newTestHealthPing(),
+		reprobeDelay: 10 * time.Millisecond,
+		reprobeFn: func(string) (time.Duration, error) {
+			started <- struct{}{}
+			<-release
+			return 25 * time.Millisecond, nil
+		},
+		runtimeFailure: &RuntimeFailureConfig{
+			BaseBackoff: int64(40 * time.Millisecond),
+			MaxBackoff:  int64(160 * time.Millisecond),
+		},
+	}
+	observer.updateActiveOutbounds([]string{"node-a"})
+	initialGeneration := observer.activeOutboundsGenerationSnapshot()
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed")
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("expected reprobe to start")
+	}
+
+	observer.updateActiveOutbounds([]string{"node-b"})
+	observer.updateActiveOutbounds([]string{"node-a"})
+	if generation := observer.activeOutboundsGenerationSnapshot(); generation == initialGeneration {
+		t.Fatal("expected remove-and-readd cycle to advance selector generation")
+	}
+	close(release)
+
+	waitForCondition(t, time.Second, func() bool {
+		return !observer.hasPendingReprobe("node-a")
+	}, "expected reprobe to finish")
+
+	if _, found := observer.hp.Results["node-a"]; found {
+		t.Fatal("expected stale reprobe result to be discarded after selector generation change")
+	}
+	if _, found := observer.failures["node-a"]; found {
+		t.Fatal("expected removed-and-readded outbound to avoid inheriting stale live failure state")
+	}
+	if _, found := observer.runtimeFailureHistories["node-a"]; found {
+		t.Fatal("expected removed-and-readded outbound to avoid inheriting stale runtime failure history")
+	}
+}
+
+func TestSelectorCacheExpiresAfterRefreshStalenessAndPausesTracking(t *testing.T) {
+	observer := &Observer{
+		hp: newTestHealthPing(),
+		runtimeFailure: &RuntimeFailureConfig{
+			BaseBackoff: int64(40 * time.Millisecond),
+			MaxBackoff:  int64(160 * time.Millisecond),
+		},
+		selectorStaleTTL: 20 * time.Millisecond,
+		failures: map[string]liveFailure{
+			"node-a": {lastErrorReason: "request failed", lastFailureTime: 123},
+		},
+		lastFailureTimes: map[string]int64{
+			"node-a": 123,
+		},
+		runtimeFailureHistories: map[string]runtimeFailureHistory{
+			"node-a": {failureStreak: 2},
+		},
+		pendingReprobe: map[string]uint64{
+			"node-a": 0,
+		},
+	}
+	observer.hp.PutResult("node-a", 20*time.Millisecond)
+	observer.setStatusSnapshot([]*observatory.OutboundStatus{{
+		Alive:       true,
+		Delay:       20,
+		OutboundTag: "node-a",
+	}}, []string{"node-a"})
+	observer.lastSuccessfulSelectorRefresh = time.Now().Add(-50 * time.Millisecond)
+	initialGeneration := observer.activeOutboundsGenerationSnapshot()
+
+	response, err := observer.GetObservation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statuses := response.(*observatory.ObservationResult).Status; len(statuses) != 0 {
+		t.Fatalf("expected expired selector cache to hide burst observations, got %+v", statuses)
+	}
+	if !observer.selectorCacheExpired {
+		t.Fatal("expected selector cache to be marked expired")
+	}
+	if observer.activeOutboundsReady {
+		t.Fatal("expected selector cache expiry to clear readiness")
+	}
+	if generation := observer.activeOutboundsGenerationSnapshot(); generation == initialGeneration {
+		t.Fatal("expected selector cache expiry to advance generation")
+	}
+	if len(observer.failures) != 0 || len(observer.lastFailureTimes) != 0 || len(observer.runtimeFailureHistories) != 0 {
+		t.Fatal("expected selector cache expiry to clear runtime failure state")
+	}
+	if len(observer.pendingReprobe) != 0 {
+		t.Fatalf("expected selector cache expiry to clear reprobe reservations, got %+v", observer.pendingReprobe)
+	}
+	if observer.hp.Results != nil {
+		t.Fatalf("expected selector cache expiry to clear health results, got %+v", observer.hp.Results)
+	}
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed again")
+	if len(observer.failures) != 0 {
+		t.Fatalf("expected tracking to pause after selector cache expiry, got %+v", observer.failures)
+	}
+}
+
+func TestSelectorRefreshAfterExpiryRestoresTrackingAndObservation(t *testing.T) {
+	manager := &burstTestHandlerSelectorManager{}
+	manager.SetSelected([]string{"node-a"})
+
+	observer := &Observer{
+		ctx:              context.Background(),
+		config:           &Config{SubjectSelector: []string{"node"}},
+		hp:               newTestHealthPing(),
+		ohm:              manager,
+		selectorStaleTTL: 20 * time.Millisecond,
+	}
+	observer.finished = done.New()
+	_ = observer.finished.Close()
+	observer.setStatusSnapshot([]*observatory.OutboundStatus{{
+		Alive:       true,
+		Delay:       20,
+		OutboundTag: "node-a",
+	}}, []string{"node-a"})
+	observer.lastSuccessfulSelectorRefresh = time.Now().Add(-50 * time.Millisecond)
+
+	response, err := observer.GetObservation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statuses := response.(*observatory.ObservationResult).Status; len(statuses) != 0 {
+		t.Fatalf("expected expired cache to hide status before refresh recovery, got %+v", statuses)
+	}
+
+	observer.refreshActiveOutbounds()
+	if observer.selectorCacheExpired {
+		t.Fatal("expected successful selector refresh to clear cache-expired state")
+	}
+	if !observer.activeOutboundsReady {
+		t.Fatal("expected successful selector refresh to restore readiness")
+	}
+
+	observer.hp.PutResult("node-a", 20*time.Millisecond)
+	observer.refreshSnapshot()
+
+	response, err = observer.GetObservation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := response.(*observatory.ObservationResult).Status
+	if len(statuses) != 1 || statuses[0].OutboundTag != "node-a" {
+		t.Fatalf("expected refreshed selector cache to allow observation rebuild, got %+v", statuses)
+	}
+
+	observer.RecordOutboundFailure(context.Background(), "node-a", "request failed")
+	if _, found := observer.failures["node-a"]; !found {
+		t.Fatal("expected tracking to resume after selector refresh recovery")
+	}
+}
+
 type burstTestHandlerSelectorManager struct {
 	mu       sync.RWMutex
 	selected []string
+	selects  atomic.Int32
 }
 
 func (*burstTestHandlerSelectorManager) Start() error { return nil }
@@ -594,6 +948,7 @@ func (*burstTestHandlerSelectorManager) ListHandlers(context.Context) []feature_
 }
 
 func (m *burstTestHandlerSelectorManager) Select([]string) []string {
+	m.selects.Add(1)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return append([]string(nil), m.selected...)
@@ -603,6 +958,10 @@ func (m *burstTestHandlerSelectorManager) SetSelected(tags []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.selected = append([]string(nil), tags...)
+}
+
+func (m *burstTestHandlerSelectorManager) SelectCallCount() int32 {
+	return m.selects.Load()
 }
 
 func newTestHealthPing() *HealthPing {
@@ -624,6 +983,12 @@ func (o *Observer) hasPendingReprobe(outboundTag string) bool {
 	defer o.reprobeLock.Unlock()
 	_, found := o.pendingReprobe[outboundTag]
 	return found
+}
+
+func (o *Observer) pendingReprobeGeneration(outboundTag string) uint64 {
+	o.reprobeLock.Lock()
+	defer o.reprobeLock.Unlock()
+	return o.pendingReprobe[outboundTag]
 }
 
 func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool, message string) {

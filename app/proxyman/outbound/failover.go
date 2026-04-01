@@ -216,6 +216,18 @@ func newCountingWriter(writer buf.Writer) *countingWriter {
 	return &countingWriter{writer: writer}
 }
 
+type downstreamWriteError struct {
+	cause error
+}
+
+func (e *downstreamWriteError) Error() string {
+	return e.cause.Error()
+}
+
+func (e *downstreamWriteError) Is(target error) bool {
+	return goerrors.Is(e.cause, target)
+}
+
 func (w *countingWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	nonEmpty := !mb.IsEmpty()
 	size := int64(mb.Len())
@@ -223,7 +235,7 @@ func (w *countingWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	if err != nil {
 		w.writeFailed = true
 		w.lastWriteError = err
-		return err
+		return &downstreamWriteError{cause: err}
 	}
 	if nonEmpty {
 		w.writeSucceeded = true
@@ -280,7 +292,7 @@ func (h *Handler) classifyBalancerFailure(ctx context.Context, err error, reques
 	if !ok || snapshot.SelectedOutboundTag == "" {
 		return balancerFailureClassificationNone
 	}
-	if writer != nil && writer.WriteFailed() {
+	if isTerminalDownstreamWriteFailure(err) {
 		return balancerFailureClassificationNone
 	}
 	if writer != nil && writer.ResponseStarted() {
@@ -301,6 +313,15 @@ func (h *Handler) classifyBalancerFailure(ctx context.Context, err error, reques
 
 func isWrappedContextCanceled(err error) bool {
 	return goerrors.Is(err, context.Canceled) && goerrors.Unwrap(err) != nil
+}
+
+func isTerminalDownstreamWriteFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	_, ok := errors.Cause(err).(*downstreamWriteError)
+	return ok
 }
 
 func (h *Handler) handleBalancerFailure(ctx context.Context, writer buf.Writer, requestReader *countingReader, err error, classification balancerFailureClassification) bool {
