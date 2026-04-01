@@ -46,6 +46,144 @@ var (
 	globalDialerAccess sync.Mutex
 )
 
+type httpClientReservation struct {
+	client      DialerClient
+	xmuxClient  *XmuxClient
+	releaseOnce sync.Once
+}
+
+func reserveHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) *httpClientReservation {
+	client, xmuxClient := getHTTPClient(ctx, dest, streamSettings)
+	if xmuxClient != nil {
+		xmuxClient.OpenUsage.Add(1)
+	}
+	return &httpClientReservation{
+		client:     client,
+		xmuxClient: xmuxClient,
+	}
+}
+
+func (r *httpClientReservation) Client() DialerClient {
+	if r == nil {
+		return nil
+	}
+	return r.client
+}
+
+func (r *httpClientReservation) Release() {
+	if r == nil {
+		return
+	}
+	r.releaseOnce.Do(func() {
+		if r.xmuxClient != nil {
+			r.xmuxClient.OpenUsage.Add(-1)
+		}
+	})
+}
+
+func (r *httpClientReservation) ConsumeRequest() {
+	if r != nil && r.xmuxClient != nil {
+		r.xmuxClient.LeftRequests.Add(-1)
+	}
+}
+
+func (r *httpClientReservation) NeedsRefresh(now time.Time) bool {
+	if r == nil || r.xmuxClient == nil {
+		return false
+	}
+	if r.xmuxClient.LeftRequests.Load() <= 0 {
+		return true
+	}
+	return !r.xmuxClient.UnreusableAt.IsZero() && now.After(r.xmuxClient.UnreusableAt)
+}
+
+type reservationHolder struct {
+	mu          sync.Mutex
+	reservation *httpClientReservation
+}
+
+func newReservationHolder(reservation *httpClientReservation) *reservationHolder {
+	return &reservationHolder{reservation: reservation}
+}
+
+func (h *reservationHolder) Current() *httpClientReservation {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.reservation
+}
+
+func (h *reservationHolder) Swap(reservation *httpClientReservation) *httpClientReservation {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	old := h.reservation
+	h.reservation = reservation
+	return old
+}
+
+func (h *reservationHolder) Release() {
+	if h == nil {
+		return
+	}
+	if reservation := h.Swap(nil); reservation != nil {
+		reservation.Release()
+	}
+}
+
+type closeWithErrorReader interface {
+	io.ReadCloser
+	CloseWithError(error) error
+}
+
+type closeWithErrorWriter interface {
+	io.WriteCloser
+	CloseWithError(error) error
+}
+
+func closeReadWithError(reader io.ReadCloser, err error) {
+	if reader == nil {
+		return
+	}
+	if errReader, ok := reader.(closeWithErrorReader); ok {
+		_ = errReader.CloseWithError(err)
+		return
+	}
+	_ = reader.Close()
+}
+
+func closeWriteWithError(writer io.WriteCloser, err error) {
+	if writer == nil {
+		return
+	}
+	if errWriter, ok := writer.(closeWithErrorWriter); ok {
+		_ = errWriter.CloseWithError(err)
+		return
+	}
+	_ = writer.Close()
+}
+
+func relayAsyncStartFailure(started StartedReadCloser, reader io.ReadCloser, writer io.WriteCloser, uploadBody io.ReadCloser) {
+	if started == nil {
+		return
+	}
+
+	go func() {
+		if err := started.WaitStart(); err != nil {
+			closeReadWithError(reader, err)
+			if uploadBody != nil {
+				closeReadWithError(uploadBody, err)
+				return
+			}
+			closeWriteWithError(writer, err)
+		}
+	}()
+}
+
 func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (DialerClient, *XmuxClient) {
 	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
 
@@ -374,7 +512,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	requestURL.Path = transportConfiguration.GetNormalizedPath()
 	requestURL.RawQuery = transportConfiguration.GetNormalizedQuery()
 
-	httpClient, xmuxClient := getHTTPClient(ctx, dest, streamSettings)
+	uploadReservation := reserveHTTPClient(ctx, dest, streamSettings)
 	requestBehavior := transportConfiguration.NewRequestBehavior(httpVersion)
 
 	mode := transportConfiguration.Mode
@@ -397,8 +535,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	errors.LogInfo(ctx, fmt.Sprintf("XHTTP is dialing to %s, mode %s, HTTP version %s, host %s", dest, mode, httpVersion, requestURL.Host))
 
 	requestURL2 := requestURL
-	httpClient2 := httpClient
-	xmuxClient2 := xmuxClient
+	downloadReservation := uploadReservation
 	requestBehavior2 := requestBehavior
 	if transportConfiguration.DownloadSettings != nil {
 		globalDialerAccess.Lock()
@@ -435,63 +572,69 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		}
 		requestURL2.Path = config2.GetNormalizedPath()
 		requestURL2.RawQuery = config2.GetNormalizedQuery()
-		httpClient2, xmuxClient2 = getHTTPClient(ctx, dest2, memory2)
+		downloadReservation = reserveHTTPClient(ctx, dest2, memory2)
 		requestBehavior2 = config2.NewRequestBehavior(httpVersion2)
 		errors.LogInfo(ctx, fmt.Sprintf("XHTTP is downloading from %s, mode %s, HTTP version %s, host %s", dest2, "stream-down", httpVersion2, requestURL2.Host))
 	}
 
-	if xmuxClient != nil {
-		xmuxClient.OpenUsage.Add(1)
-	}
-	if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
-		xmuxClient2.OpenUsage.Add(1)
-	}
 	var closed atomic.Int32
 
 	reader, writer := io.Pipe()
+	packetUploadReservations := newReservationHolder(uploadReservation)
 	conn := splitConn{
 		writer: writer,
 		onClose: func() {
 			if closed.Add(1) > 1 {
 				return
 			}
-			if xmuxClient != nil {
-				xmuxClient.OpenUsage.Add(-1)
-			}
-			if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
-				xmuxClient2.OpenUsage.Add(-1)
+			packetUploadReservations.Release()
+			if downloadReservation != uploadReservation {
+				downloadReservation.Release()
 			}
 		},
 	}
 
-	var err error
 	if mode == "stream-one" {
 		requestURL.Path = transportConfiguration.GetNormalizedPath()
-		if xmuxClient != nil {
-			xmuxClient.LeftRequests.Add(-1)
-		}
-		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, false, requestBehavior)
+		uploadReservation.ConsumeRequest()
+		streamReader, remoteAddr, localAddr, err := uploadReservation.Client().OpenStream(ctx, requestURL.String(), sessionId, reader, false, requestBehavior)
 		if err != nil { // browser dialer only
+			uploadReservation.Release()
 			return nil, err
 		}
+		conn.reader, conn.remoteAddr, conn.localAddr = streamReader, remoteAddr, localAddr
+		relayAsyncStartFailure(streamReader, nil, conn.writer, reader)
 		return stat.Connection(&conn), nil
 	} else { // stream-down
-		if xmuxClient2 != nil {
-			xmuxClient2.LeftRequests.Add(-1)
-		}
-		conn.reader, conn.remoteAddr, conn.localAddr, err = httpClient2.OpenStream(ctx, requestURL2.String(), sessionId, nil, false, requestBehavior2)
+		downloadReservation.ConsumeRequest()
+		streamReader, remoteAddr, localAddr, err := downloadReservation.Client().OpenStream(ctx, requestURL2.String(), sessionId, nil, false, requestBehavior2)
 		if err != nil { // browser dialer only
+			if downloadReservation != uploadReservation {
+				downloadReservation.Release()
+			}
+			packetUploadReservations.Release()
 			return nil, err
 		}
+		if err := streamReader.WaitStart(); err != nil {
+			if downloadReservation != uploadReservation {
+				downloadReservation.Release()
+			}
+			packetUploadReservations.Release()
+			return nil, err
+		}
+		conn.reader, conn.remoteAddr, conn.localAddr = streamReader, remoteAddr, localAddr
 	}
 	if mode == "stream-up" {
-		if xmuxClient != nil {
-			xmuxClient.LeftRequests.Add(-1)
-		}
-		_, _, _, err = httpClient.OpenStream(ctx, requestURL.String(), sessionId, reader, true, requestBehavior)
+		uploadReservation.ConsumeRequest()
+		uploadReader, _, _, err := uploadReservation.Client().OpenStream(ctx, requestURL.String(), sessionId, reader, true, requestBehavior)
 		if err != nil { // browser dialer only
+			if downloadReservation != uploadReservation {
+				downloadReservation.Release()
+			}
+			packetUploadReservations.Release()
 			return nil, err
 		}
+		relayAsyncStartFailure(uploadReader, conn.reader, conn.writer, reader)
 		return stat.Connection(&conn), nil
 	}
 
@@ -566,10 +709,16 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 				lastWrite = time.Now()
 
-				if xmuxClient != nil && (xmuxClient.LeftRequests.Add(-1) <= 0 ||
-					(xmuxClient.UnreusableAt != time.Time{} && lastWrite.After(xmuxClient.UnreusableAt))) {
-					httpClient, xmuxClient = getHTTPClient(ctx, dest, streamSettings)
+				currentReservation := packetUploadReservations.Current()
+				if currentReservation == nil || currentReservation.NeedsRefresh(lastWrite) {
+					nextReservation := reserveHTTPClient(ctx, dest, streamSettings)
+					if oldReservation := packetUploadReservations.Swap(nextReservation); oldReservation != nil {
+						oldReservation.Release()
+					}
+					currentReservation = nextReservation
 				}
+				currentReservation.ConsumeRequest()
+				httpClient := currentReservation.Client()
 
 				payloadBytes, err := buf.ReadAllToBytes(&buf.MultiBufferContainer{MultiBuffer: chunk})
 				if err != nil {
@@ -709,7 +858,7 @@ func isRetriablePostError(err error) bool {
 	var statusErr *HTTPStatusError
 	if stderrors.As(err, &statusErr) {
 		switch statusErr.StatusCode {
-		case http.StatusConflict, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 			return true
 		default:
 			return false

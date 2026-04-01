@@ -5,6 +5,7 @@ import (
 	"context"
 	gotls "crypto/tls"
 	"encoding/base64"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,6 +38,7 @@ type requestHandler struct {
 	ln             *Listener
 	sessionMu      *sync.Mutex
 	sessions       sync.Map
+	closedSessions sync.Map
 	localAddr      net.Addr
 	socketSettings *internet.SocketConfig
 	closeOnce      sync.Once
@@ -59,6 +61,8 @@ type httpSession struct {
 }
 
 const sessionSweepInterval = 500 * time.Millisecond
+
+var errSessionGone = stderrors.New("xhttp session gone")
 
 func newHTTPSession(config *Config) *httpSession {
 	session := &httpSession{
@@ -97,6 +101,67 @@ func (s *httpSession) expiredAt(now time.Time) bool {
 	return s.idleTimeout > 0 && now.Sub(s.lastTouchedAt()) >= s.idleTimeout
 }
 
+func (h *requestHandler) sessionTombstoneTTL() time.Duration {
+	config := h.config
+	if config == nil && h.ln != nil {
+		config = h.ln.config
+	}
+	if config == nil {
+		return 30 * time.Second
+	}
+
+	ttl := config.GetNormalizedSessionOpenTimeout()
+	if idleTimeout := config.GetNormalizedSessionIdleTimeout(); idleTimeout > ttl {
+		ttl = idleTimeout
+	}
+	if ttl < 30*time.Second {
+		ttl = 30 * time.Second
+	}
+	return ttl
+}
+
+func (h *requestHandler) isClosedSession(sessionId string, now time.Time) bool {
+	closedAtAny, ok := h.closedSessions.Load(sessionId)
+	if !ok {
+		return false
+	}
+
+	closedAt := closedAtAny.(time.Time)
+	if now.Sub(closedAt) > h.sessionTombstoneTTL() {
+		h.closedSessions.Delete(sessionId)
+		return false
+	}
+
+	return true
+}
+
+func (h *requestHandler) markSessionGone(sessionId string) {
+	if sessionId == "" {
+		return
+	}
+	h.closedSessions.Store(sessionId, time.Now())
+}
+
+func (h *requestHandler) closeSession(sessionId string, session *httpSession) {
+	if sessionId == "" || session == nil {
+		return
+	}
+	h.sessions.Delete(sessionId)
+	session.close()
+	h.markSessionGone(sessionId)
+}
+
+func uploadErrorStatus(err error) int {
+	switch {
+	case stderrors.Is(err, errSessionGone), stderrors.Is(err, errUploadQueueClosed):
+		return http.StatusGone
+	case stderrors.Is(err, errUploadReaderExists):
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
 func (h *requestHandler) ensureReaper() {
 	h.reaperOnce.Do(func() {
 		if h.closeCh == nil {
@@ -114,8 +179,13 @@ func (h *requestHandler) ensureReaper() {
 					h.sessions.Range(func(key, value any) bool {
 						session := value.(*httpSession)
 						if session.expiredAt(now) {
-							h.sessions.Delete(key)
-							session.close()
+							h.closeSession(key.(string), session)
+						}
+						return true
+					})
+					h.closedSessions.Range(func(key, value any) bool {
+						if now.Sub(value.(time.Time)) > h.sessionTombstoneTTL() {
+							h.closedSessions.Delete(key)
 						}
 						return true
 					})
@@ -167,15 +237,20 @@ func joinPayloadParts(parts ...[]byte) []byte {
 	return payload
 }
 
-func (h *requestHandler) upsertSession(sessionId string) *httpSession {
+func (h *requestHandler) upsertSession(sessionId string) (*httpSession, error) {
 	h.ensureReaper()
+	now := time.Now()
 
 	// fast path
 	currentSessionAny, ok := h.sessions.Load(sessionId)
 	if ok {
 		currentSession := currentSessionAny.(*httpSession)
 		currentSession.touch()
-		return currentSession
+		return currentSession, nil
+	}
+
+	if h.isClosedSession(sessionId, now) {
+		return nil, errSessionGone
 	}
 
 	// slow path
@@ -186,14 +261,19 @@ func (h *requestHandler) upsertSession(sessionId string) *httpSession {
 	if ok {
 		currentSession := currentSessionAny.(*httpSession)
 		currentSession.touch()
-		return currentSession
+		return currentSession, nil
+	}
+
+	if h.isClosedSession(sessionId, now) {
+		return nil, errSessionGone
 	}
 
 	s := newHTTPSession(h.ln.config)
 
+	h.closedSessions.Delete(sessionId)
 	h.sessions.Store(sessionId, s)
 
-	return s
+	return s, nil
 }
 
 func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -294,7 +374,12 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 	var currentSession *httpSession
 	if sessionId != "" {
-		currentSession = h.upsertSession(sessionId)
+		currentSession, err = h.upsertSession(sessionId)
+		if err != nil {
+			errors.LogInfoInner(context.Background(), err, "failed to upsert session")
+			writer.WriteHeader(uploadErrorStatus(err))
+			return
+		}
 		currentSession.touch()
 	}
 	scMaxEachPostBytes := int(h.ln.config.GetNormalizedScMaxEachPostBytes().To)
@@ -327,7 +412,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			})
 			if err != nil {
 				errors.LogInfoInner(context.Background(), err, "failed to upload (PushReader)")
-				writer.WriteHeader(http.StatusConflict)
+				writer.WriteHeader(uploadErrorStatus(err))
 			} else {
 				writer.Header().Set("X-Accel-Buffering", "no")
 				writer.Header().Set("Cache-Control", "no-store")
@@ -432,7 +517,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		seq, err := strconv.ParseUint(seqStr, 10, 64)
 		if err != nil {
 			errors.LogInfoInner(context.Background(), err, "failed to upload (ParseUint)")
-			writer.WriteHeader(http.StatusInternalServerError)
+			writer.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
@@ -443,7 +528,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 		if err != nil {
 			errors.LogInfoInner(context.Background(), err, "failed to upload (PushPayload)")
-			writer.WriteHeader(http.StatusInternalServerError)
+			writer.WriteHeader(uploadErrorStatus(err))
 			return
 		}
 		currentSession.touch()
@@ -459,7 +544,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			// after GET is done, the connection is finished. disable automatic
 			// session reaping, and handle it in defer
 			currentSession.isFullyConnected.Close()
-			defer h.sessions.Delete(sessionId)
+			defer h.closeSession(sessionId, currentSession)
 		}
 
 		// magic header instructs nginx + apache to not buffer response body

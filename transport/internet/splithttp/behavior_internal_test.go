@@ -81,7 +81,10 @@ func TestSessionOpenTimeoutReapsUnconnectedSession(t *testing.T) {
 		sessionMu: &sync.Mutex{},
 	}
 
-	session := handler.upsertSession("open-timeout")
+	session, err := handler.upsertSession("open-timeout")
+	if err != nil {
+		t.Fatalf("unexpected upsert error: %v", err)
+	}
 	if _, ok := handler.sessions.Load("open-timeout"); !ok {
 		t.Fatal("expected session to exist immediately after creation")
 	}
@@ -101,7 +104,10 @@ func TestSessionIdleTimeoutReapsConnectedSession(t *testing.T) {
 		sessionMu: &sync.Mutex{},
 	}
 
-	session := handler.upsertSession("idle-timeout")
+	session, err := handler.upsertSession("idle-timeout")
+	if err != nil {
+		t.Fatalf("unexpected upsert error: %v", err)
+	}
 	session.isFullyConnected.Close()
 	session.touch()
 

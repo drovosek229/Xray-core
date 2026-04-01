@@ -21,7 +21,7 @@ type DialerClient interface {
 	IsClosed() bool
 
 	// ctx, url, sessionId, body, uploadOnly
-	OpenStream(context.Context, string, string, io.Reader, bool, *RequestBehavior) (io.ReadCloser, net.Addr, net.Addr, error)
+	OpenStream(context.Context, string, string, io.Reader, bool, *RequestBehavior) (StartedReadCloser, net.Addr, net.Addr, error)
 
 	// ctx, url, sessionId, seqStr, body, contentLength
 	PostPacket(context.Context, string, string, string, io.Reader, int64, *RequestBehavior) error
@@ -38,15 +38,40 @@ type DefaultDialerClient struct {
 	dialUploadConn  func(ctxInner context.Context) (net.Conn, error)
 }
 
+type StartedReadCloser interface {
+	io.ReadCloser
+	WaitStart() error
+	CloseWithError(error) error
+}
+
+type readyReadCloser struct {
+	io.ReadCloser
+}
+
+func (r *readyReadCloser) WaitStart() error {
+	return nil
+}
+
+func (r *readyReadCloser) CloseWithError(err error) error {
+	return r.Close()
+}
+
 func (c *DefaultDialerClient) IsClosed() bool {
 	return c.closed.Load()
 }
 
-func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool, behavior *RequestBehavior) (wrc io.ReadCloser, remoteAddr, localAddr net.Addr, err error) {
+type streamOpenResult struct {
+	reader io.ReadCloser
+	err    error
+}
+
+func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessionId string, body io.Reader, uploadOnly bool, behavior *RequestBehavior) (StartedReadCloser, net.Addr, net.Addr, error) {
 	// this is done when the TCP/UDP connection to the server was established,
 	// and we can unblock the Dial function and print correct net addresses in
 	// logs
 	gotConn := done.New()
+	var remoteAddr net.Addr
+	var localAddr net.Addr
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 		GotConn: func(connInfo httptrace.GotConnInfo) {
 			remoteAddr = connInfo.Conn.RemoteAddr()
@@ -62,32 +87,55 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 	req, _ := http.NewRequestWithContext(context.WithoutCancel(ctx), method, url, body)
 	c.transportConfig.FillStreamRequest(req, sessionId, "", behavior)
 
-	wrc = &WaitReadCloser{Wait: make(chan struct{})}
+	resultCh := make(chan streamOpenResult, 1)
 	go func() {
 		resp, err := c.client.Do(req)
 		if err != nil {
-			if !uploadOnly { // stream-down is enough
-				c.closed.Store(true)
-				errors.LogInfoInner(ctx, err, "failed to "+method+" "+url)
-			}
+			c.closed.Store(true)
+			errors.LogInfoInner(ctx, err, "failed to "+method+" "+url)
 			gotConn.Close()
-			wrc.Close()
+			resultCh <- streamOpenResult{err: err}
 			return
 		}
-		if resp.StatusCode != 200 && !uploadOnly {
-			errors.LogInfo(ctx, "unexpected status ", resp.StatusCode)
+		if resp.StatusCode != 200 {
+			err = &HTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			resultCh <- streamOpenResult{err: err}
+			return
 		}
-		if resp.StatusCode != 200 || uploadOnly { // stream-up
+		if uploadOnly {
+			resultCh <- streamOpenResult{}
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close() // if it is called immediately, the upload will be interrupted also
-			wrc.Close()
 			return
 		}
-		wrc.(*WaitReadCloser).Set(resp.Body)
+		resultCh <- streamOpenResult{reader: resp.Body}
+	}()
+
+	wrc := &WaitReadCloser{Wait: make(chan struct{})}
+
+	if body == nil && !uploadOnly {
+		result := <-resultCh
+		if result.err != nil {
+			wrc.SetError(result.err)
+			return nil, remoteAddr, localAddr, result.err
+		}
+		wrc.Set(result.reader)
+		return wrc, remoteAddr, localAddr, nil
+	}
+
+	go func() {
+		result := <-resultCh
+		if result.err != nil {
+			wrc.SetError(result.err)
+			return
+		}
+		wrc.Set(result.reader)
 	}()
 
 	<-gotConn.Wait()
-	return
+	return wrc, remoteAddr, localAddr, nil
 }
 
 func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessionId string, seqStr string, body io.Reader, contentLength int64, behavior *RequestBehavior) error {
@@ -267,6 +315,8 @@ type WaitReadCloser struct {
 	readyOnce sync.Once
 	mu        sync.Mutex
 	reader    io.ReadCloser
+	startErr  error
+	readErr   error
 	closed    bool
 }
 
@@ -276,11 +326,8 @@ func (w *WaitReadCloser) Set(rc io.ReadCloser) {
 
 	w.mu.Lock()
 	switch {
-	case w.closed || w.reader != nil:
+	case w.closed || w.reader != nil || w.startErr != nil:
 		toClose = rc
-	case rc == nil:
-		w.closed = true
-		signalReady = true
 	default:
 		w.reader = rc
 		signalReady = true
@@ -295,16 +342,74 @@ func (w *WaitReadCloser) Set(rc io.ReadCloser) {
 	}
 }
 
+func (w *WaitReadCloser) SetError(err error) {
+	if err == nil {
+		err = io.ErrClosedPipe
+	}
+
+	var reader io.ReadCloser
+	var signalReady bool
+
+	w.mu.Lock()
+	if !w.closed {
+		w.closed = true
+		reader = w.reader
+		w.reader = nil
+		if w.readErr == nil {
+			w.readErr = err
+		}
+		if w.startErr == nil && w.Wait != nil {
+			w.startErr = err
+		}
+		signalReady = true
+	}
+	w.mu.Unlock()
+
+	if signalReady {
+		w.signalReady()
+	}
+	if reader != nil {
+		_ = reader.Close()
+	}
+}
+
+func (w *WaitReadCloser) WaitStart() error {
+	if w.Wait != nil {
+		<-w.Wait
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.startErr
+}
+
 func (w *WaitReadCloser) Read(b []byte) (int, error) {
 	if w.Wait != nil {
 		<-w.Wait
 	}
-	// Channel close in signalReady publishes reader/closed state to waiters, so
-	// the hot read path doesn't need to take the mutex after readiness.
-	if w.reader == nil {
+
+	w.mu.Lock()
+	reader := w.reader
+	readErr := w.readErr
+	w.mu.Unlock()
+
+	if reader == nil {
+		if readErr != nil {
+			return 0, readErr
+		}
 		return 0, io.ErrClosedPipe
 	}
-	return w.reader.Read(b)
+
+	n, err := reader.Read(b)
+	if err != nil && n == 0 {
+		w.mu.Lock()
+		readErr = w.readErr
+		w.mu.Unlock()
+		if readErr != nil {
+			return 0, readErr
+		}
+	}
+	return n, err
 }
 
 func (w *WaitReadCloser) Close() error {
@@ -315,6 +420,36 @@ func (w *WaitReadCloser) Close() error {
 	}
 	w.closed = true
 	reader := w.reader
+	w.mu.Unlock()
+
+	w.signalReady()
+	if reader != nil {
+		return reader.Close()
+	}
+	return nil
+}
+
+func (w *WaitReadCloser) CloseWithError(err error) error {
+	if err == nil {
+		return w.Close()
+	}
+
+	var reader io.ReadCloser
+
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return nil
+	}
+	w.closed = true
+	reader = w.reader
+	w.reader = nil
+	if w.readErr == nil {
+		w.readErr = err
+	}
+	if w.startErr == nil && w.Wait != nil {
+		w.startErr = err
+	}
 	w.mu.Unlock()
 
 	w.signalReady()
